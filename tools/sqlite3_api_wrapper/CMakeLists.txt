@@ -43,3 +43,5 @@ if(WIN32 OR ZOS)
 else()
   target_link_libraries(test_sqlite3_api_wrapper sqlite3_api_wrapper)
 endif()
+
+link_threads(test_sqlite3_api_wrapper)
