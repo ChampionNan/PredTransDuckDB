@@ -33,4 +33,14 @@ vector<ColumnBinding> LogicalUseBF::GetColumnBindings() {
 void LogicalUseBF::AddDownStreamOperator(LogicalCreateBF *op) {
 	related_create_bf.emplace_back(op);
 }
+
+string LogicalUseBF::ParamsToString() const {
+	string result = LogicalOperator::ParamsToString();
+	auto ColomnBindings = const_cast<LogicalUseBF*>(this)->GetColumnBindings();
+	for (auto &binding : ColomnBindings) {
+		result += binding.ToString();
+	}
+	return result;
 }
+
+} // namespace duckdb

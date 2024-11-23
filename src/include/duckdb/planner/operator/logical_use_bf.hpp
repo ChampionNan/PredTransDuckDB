@@ -26,6 +26,8 @@ public:
 	vector<LogicalCreateBF*> related_create_bf;
 
 public:
+	string ParamsToString() const override;
+	
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<LogicalOperator> Deserialize(Deserializer &deserializer);
 

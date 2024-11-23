@@ -195,7 +195,7 @@ pair<int, int> DAGManager::FindEdge(unordered_set<int> &constructed_set, unorder
             auto key = make_pair(j, i);
             if (filters_and_bindings_.find(key) != filters_and_bindings_.end()) {
                 auto card = nodes_manager.getNode(i)->estimated_cardinality;
-                auto weight = filters_and_bindings_[key].size();
+                auto weight = filters_and_bindings_[key].size(); // # of filters = # join conditions
                 if(weight > max_weight) {
                     max_weight = weight;
                     max_card = card;

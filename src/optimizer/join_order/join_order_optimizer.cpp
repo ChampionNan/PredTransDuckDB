@@ -24,7 +24,7 @@ static bool HasJoin(LogicalOperator *op) {
 
 unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOperator> plan,
                                                          optional_ptr<RelationStats> stats) {
-
+    std::cout << "At JoinOrderOptimizer Optimize!" << std::endl;
 	// make sure query graph manager has not extracted a relation graph already
 	LogicalOperator *op = plan.get();
 
@@ -48,8 +48,8 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOpera
 		plan_enumerator.InitLeafPlans();
 
 		// Ask the plan enumerator to enumerate a number of join orders
-		auto final_plan = plan_enumerator.SolveJoinOrder();
-		// auto final_plan = plan_enumerator.SolveJoinOrderLeftDeep();
+		// auto final_plan = plan_enumerator.SolveJoinOrder();
+		auto final_plan = plan_enumerator.SolveJoinOrderLeftDeep();
 		// auto final_plan = plan_enumerator.SolveJoinOrderRandom();
 		// auto final_plan = plan_enumerator.SolveJoinOrderLeftDeepRandom();
 		// TODO: add in the check that if no plan exists, you have to add a cross product.

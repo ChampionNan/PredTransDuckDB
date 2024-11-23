@@ -29,4 +29,13 @@ void LogicalCreateBF::ResolveTypes() {
 vector<ColumnBinding> LogicalCreateBF::GetColumnBindings() {
 	return children[0]->GetColumnBindings();
 }
+
+string LogicalCreateBF::ParamsToString() const {
+	string result = LogicalOperator::ParamsToString();
+	auto ColomnBindings = const_cast<LogicalCreateBF*>(this)->GetColumnBindings();
+	for (auto &binding : ColomnBindings) {
+		result += binding.ToString();
+	}
+	return result;
+}
 }

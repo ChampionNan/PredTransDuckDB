@@ -344,3 +344,13 @@ extension/extension_config_local.cmake
 
 # extension_external dir
 extension_external
+1G
+50G
+job_csv
+social-network-sf10-merged-fk
+test_db
+epinions.txt
+out.txt
+result.txt
+test_tpch.sql
+.vscode-server

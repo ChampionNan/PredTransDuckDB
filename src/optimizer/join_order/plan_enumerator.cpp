@@ -503,6 +503,7 @@ void PlanEnumerator::InitLeafPlans() {
 	// nodes of the join tree NOTE: we can just use pointers to JoinRelationSet* here because the GetJoinRelation
 	// function ensures that a unique combination of relations will have a unique JoinRelationSet object.
 	// first initialize equivalent relations based on the filters
+	std::cout << "InitLeafPlans! " << std::endl;
 	auto relation_stats = query_graph_manager.relation_manager.GetRelationStats();
 
 	cost_model.cardinality_estimator.InitEquivalentRelations(query_graph_manager.GetFilterBindings());
@@ -524,6 +525,7 @@ void PlanEnumerator::InitLeafPlans() {
 // Moerkotte and Thomas Neumannn, see that paper for additional info/documentation bonus slides:
 // https://db.in.tum.de/teaching/ws1415/queryopt/chapter3.pdf?lang=de
 unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrder() {
+	std::cout << "SolverJoinOrder! " << std::endl;
 	bool force_no_cross_product = query_graph_manager.context.config.force_no_cross_product;
 	// first try to solve the join order exactly
 	if (!SolveJoinOrderExactly()) {

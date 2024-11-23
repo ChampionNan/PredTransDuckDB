@@ -78,6 +78,8 @@ void Optimizer::Verify(LogicalOperator &op) {
 }
 
 unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p) {
+	// std::cout << "At whole Optimize! " << std::endl;
+	// auto total_start = std::chrono::high_resolution_clock::now();
 	Verify(*plan_p);
 
 	switch (plan_p->type) {
@@ -117,18 +119,22 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 
 	// then we start the first phase of predicate transfer optimization,
 	// building the transfer graph
+	// auto start1 = std::chrono::high_resolution_clock::now();
 	PredicateTransferOptimizer PT(context);
 	plan = PT.PreOptimize(std::move(plan));
+	// auto end1 = std::chrono::high_resolution_clock::now();
 
 	// then we perform the join ordering optimization
 	// this also rewrites cross products + filters into joins and performs filter pushdowns
-	// auto start = std::chrono::high_resolution_clock::now();
+	// auto start2 = std::chrono::high_resolution_clock::now();
 	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
 		JoinOrderOptimizer optimizer(context);
 		plan = optimizer.Optimize(std::move(plan));
 	});
 
 	plan = PT.Optimize(std::move(plan));
+	// auto end2 = std::chrono::high_resolution_clock::now();
+	// std::cout << "PT-Opt Time: " << std::chrono::duration_cast<std::chrono::microseconds>(end1 - start1).count() << " µs" << std::endl;
 
 	// rewrites UNNESTs in DelimJoins by moving them to the projection
 	RunOptimizer(OptimizerType::UNNEST_REWRITER, [&]() {
@@ -208,6 +214,9 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 			optimizer_extension.optimize_function(context, optimizer_extension.optimizer_info.get(), plan);
 		});
 	}
+
+	// auto total_end = std::chrono::high_resolution_clock::now();
+	// std::cout << "Total Opt Time: " << std::chrono::duration_cast<std::chrono::microseconds>(total_end - total_start).count() << " µs" << std::endl;
 
 	Planner::VerifyPlan(context, plan);
 

@@ -130,6 +130,10 @@ string LogicalOperatorToString(LogicalOperatorType type) {
 		return "CUSTOM_OP";
 	case LogicalOperatorType::LOGICAL_PIVOT:
 		return "PIVOT";
+	case LogicalOperatorType::LOGICAL_USE_BF:
+		return "USE_BF";
+	case LogicalOperatorType::LOGICAL_CREATE_BF:
+		return "CREATE_BF";
 	}
 	return "INVALID";
 }
