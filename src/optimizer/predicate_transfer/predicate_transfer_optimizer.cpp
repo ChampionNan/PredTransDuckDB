@@ -59,6 +59,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 		}
 	}	
 	//Backward
+	/*
 	for(int i = 0; i < ordered_nodes.size(); i++) {
         auto &current_node = ordered_nodes[i];
 		std::cout << "Back Current Node: " << i << ' ' << current_node->GetName() << std::endl;
@@ -75,6 +76,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 		 	dag_manager.Add(BF.first, BF.second, true);
 		}
 	}
+	*/
 	auto result = InsertCreateBFOperator_d(std::move(plan));
 	// auto result = InsertCreateBFOperator(std::move(plan));
 	std::cout << "Alter Plan Begin " << std::endl;
@@ -435,6 +437,58 @@ bool PredicateTransferOptimizer::PossibleFilterAny(LogicalOperator &node, bool r
 		}
 	}
 	return true;
+}
+
+unique_ptr<LogicalOperator> PredicateTransferOptimizer::ReplaceSemiWithBF(unique_ptr<LogicalOperator> op) {
+	std::cout << "At ReplaceSemiWithBF!" << std::endl;
+	op->Print();
+	// 1. judge type
+	if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &join = op->Cast<LogicalComparisonJoin>();
+		if (join.join_type == JoinType::SEMI) {
+			vector<shared_ptr<BlockedBloomFilter>> temp_result_to_create;
+			// 2. get node bindings
+			for (auto &cond: join.conditions) {
+				auto comparison = make_uniq<BoundComparisonExpression>(cond.comparison, cond.left->Copy(), cond.right->Copy());
+				vector<BoundColumnRefExpression*> expressions;
+				GetColumnBindingExpression(*(comparison->left.get()), expressions);
+				GetColumnBindingExpression(*(comparison->right.get()), expressions);
+				if (expressions.size() != 2) {
+					throw InternalException("No built colmun found!");
+				}
+				auto cur_filter = make_shared<BlockedBloomFilter>();
+				cur_filter->AddColumnBindingApplied(expressions[0]->binding);
+				cur_filter->AddColumnBindingBuilt(expressions[1]->binding);
+				temp_result_to_create.emplace_back(cur_filter);
+			}
+			auto create_bf = make_uniq<LogicalCreateBF>(temp_result_to_create);
+			create_bf->has_estimated_cardinality = true;
+			create_bf->estimated_cardinality = join.children[1]->estimated_cardinality;
+			// 4. use_bf
+			unique_ptr<LogicalUseBF> pre_use_bf;
+			unique_ptr<LogicalUseBF> use_bf;	
+			for (int i = temp_result_to_create.size() - 1; i >= 0; --i) {
+				vector<shared_ptr<BlockedBloomFilter>> v;
+				v.emplace_back(temp_result_to_create[i]);
+				use_bf = make_uniq<LogicalUseBF>(v);
+				use_bf->has_estimated_cardinality = true;
+				use_bf->estimated_cardinality = join.children[0]->estimated_cardinality;
+				use_bf->AddDownStreamOperator((LogicalCreateBF*)(create_bf.get()));
+				if (pre_use_bf != nullptr) {
+					use_bf->AddChild(std::move(pre_use_bf));
+				}
+				pre_use_bf = std::move(use_bf);
+			}
+			create_bf->AddChild(std::move(join.children[1]));
+			pre_use_bf->AddChild(std::move(join.children[0]));
+			pre_use_bf->AddChild(std::move(create_bf));
+			op = std::move(pre_use_bf);
+		}
+	}
+	for (auto &child : op->children) {
+		child = ReplaceSemiWithBF(std::move(child));
+	}
+	return op;
 }
 
 // /* Only for microbenchmark */

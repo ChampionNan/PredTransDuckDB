@@ -348,9 +348,11 @@ extension_external
 50G
 job_csv
 social-network-sf10-merged-fk
-test_db
+test_db*
 epinions.txt
 out.txt
 result.txt
 test_tpch.sql
 .vscode-server
+root
+

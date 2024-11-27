@@ -16,6 +16,8 @@ public:
     unique_ptr<LogicalOperator> InsertCreateBFOperator(unique_ptr<LogicalOperator> plan);
 
     unique_ptr<LogicalOperator> InsertCreateBFOperator_d(unique_ptr<LogicalOperator> plan);
+
+    unique_ptr<LogicalOperator> ReplaceSemiWithBF(unique_ptr<LogicalOperator> op);
     
 private:   
 	ClientContext &context;
