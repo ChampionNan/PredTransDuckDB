@@ -12,6 +12,8 @@ unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalUseBF &op)
     for(auto cell : op.related_create_bf) {
         use_bf->related_create_bf.emplace_back(CreatePlanfromRelated(*cell));
     }
+    unique_ptr<PhysicalOperator> plan_c = CreatePlan(*op.children[1]);
+    use_bf->children.emplace_back(std::move(plan_c));
     plan = std::move(use_bf);
     return plan;
 }

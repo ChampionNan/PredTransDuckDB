@@ -141,7 +141,7 @@ void ExpressionExecutor::Verify(const Expression &expr, Vector &vector, idx_t co
 }
 
 unique_ptr<ExpressionState> ExpressionExecutor::InitializeState(const Expression &expr,
-                                                                ExpressionExecutorState &state) {
+                                                                ExpressionExecutorState &state) {												
 	switch (expr.expression_class) {
 	case ExpressionClass::BOUND_REF:
 		return InitializeState(expr.Cast<BoundReferenceExpression>(), state);

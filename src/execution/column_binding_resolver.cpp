@@ -108,12 +108,13 @@ void ColumnBindingResolver::VisitOperator(LogicalOperator &op) {
 		VisitOperatorExpressions(op);
 		return;
 	}
+	/*
 	case LogicalOperatorType::LOGICAL_PROJECTION: {
 		//: Add for bloom_filter replace semijoin
 		VisitOperatorChildren(op);
 		bindings = op.GetColumnBindings();
 		return;
-	}
+	}*/
 	case LogicalOperatorType::LOGICAL_INSERT: {
 		//! We want to execute the normal path, but also add a dummy 'excluded' binding if there is a
 		// ON CONFLICT DO UPDATE clause

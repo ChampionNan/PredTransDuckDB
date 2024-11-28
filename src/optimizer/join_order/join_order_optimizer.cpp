@@ -24,7 +24,6 @@ static bool HasJoin(LogicalOperator *op) {
 
 unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOperator> plan,
                                                          optional_ptr<RelationStats> stats) {
-    std::cout << "At JoinOrderOptimizer Optimize!" << std::endl;
 	// make sure query graph manager has not extracted a relation graph already
 	LogicalOperator *op = plan.get();
 

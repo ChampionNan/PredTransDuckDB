@@ -48,9 +48,19 @@ void PhysicalUseBF::BuildPipelines(Pipeline &current, MetaPipeline &meta_pipelin
 
 	auto &state = meta_pipeline.GetState();
 	state.AddPipelineOperator(current, *this);
-	children[0]->BuildPipelines(current, meta_pipeline);
 	for(auto cell : related_create_bf) {
 		cell->BuildPipelinesFromRelated(current, meta_pipeline);
+	}
+	children[0]->BuildPipelines(current, meta_pipeline);
+}
+
+vector<const_reference<PhysicalOperator>> PhysicalUseBF::GetSources() const {
+	vector<const_reference<PhysicalOperator>> result;
+	if (IsSink()) {
+		result.push_back(*this);
+		return result;
+	} else {
+		return children[0]->GetSources();
 	}
 }
 }

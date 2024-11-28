@@ -440,8 +440,6 @@ bool PredicateTransferOptimizer::PossibleFilterAny(LogicalOperator &node, bool r
 }
 
 unique_ptr<LogicalOperator> PredicateTransferOptimizer::ReplaceSemiWithBF(unique_ptr<LogicalOperator> op) {
-	std::cout << "At ReplaceSemiWithBF!" << std::endl;
-	op->Print();
 	// 1. judge type
 	if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
 		auto &join = op->Cast<LogicalComparisonJoin>();
