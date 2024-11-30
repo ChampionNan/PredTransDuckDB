@@ -36,17 +36,10 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::PreOptimize(unique_ptr<L
 
 unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<LogicalOperator> plan,
                                                                  optional_ptr<RelationStats> stats) {
-	std::cout << "At PT Optimize!" << std::endl;
 	auto &ordered_nodes = dag_manager.getExecOrder();
-	std::cout << "Plan Begin " << std::endl;
-	plan->Print();
-	std::cout << "Plan End " << std::endl;
 	// Forward
 	for(int i = ordered_nodes.size() - 1; i >= 0; i--) {
         auto current_node = ordered_nodes[i];
-		std::cout << "Forward Current Node: " << i << ' ' << current_node->GetName() << std::endl;
-		std::cout << "String1: " << current_node->ParamsToString() << std::endl;
-		std::cout << "Type: " << (int)current_node->type << std::endl;
 		// We do predicate transfer in the function CreateBloomFilter
 		// query_graph_manager holds the input bloom filter
 		// return BF and its corresponding table id
@@ -62,9 +55,6 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 	/*
 	for(int i = 0; i < ordered_nodes.size(); i++) {
         auto &current_node = ordered_nodes[i];
-		std::cout << "Back Current Node: " << i << ' ' << current_node->GetName() << std::endl;
-		std::cout << "String1: " << current_node->ParamsToString() << std::endl;
-		std::cout << "Type: " << (int)current_node->type << std::endl;
 		// We do predicate transfer in the function CreateBloomFilter
 		// query_graph_manager holds the input bloom filter
 		// return BF and its corresponding table id
@@ -79,9 +69,6 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 	*/
 	auto result = InsertCreateBFOperator_d(std::move(plan));
 	// auto result = InsertCreateBFOperator(std::move(plan));
-	std::cout << "Alter Plan Begin " << std::endl;
-	result->Print();
-	std::cout << "Alter Plan End " << std::endl;
 	return result;
 }
 
@@ -114,18 +101,8 @@ vector<pair<idx_t, shared_ptr<BlockedBloomFilter>>> PredicateTransferOptimizer::
 		return result;
 	}
 	// Use Bloom Filter
-	#ifdef UseHashFilter
-	std::cout << "In CreateBloomFilter UseHashFilter" << std::endl;
-	#else
-	std::cout << "In CreateBloomFilter UseBloomFilter" << std::endl;
-	#endif
 	vector<idx_t> depend_nodes;
 	GetAllBFUsed(cur, temp_result_to_use, depend_nodes, reverse);
-	std::cout << "GetAllBFUsed: " << temp_result_to_use.size() << std::endl;
-	std::cout << "GetAllBFUsed: " << depend_nodes.size() << std::endl;
-	for (auto &id : depend_nodes) {
-		std::cout << "Depend Nodes: " << id << std::endl;
-	}
 	// Create Bloom Filter
 	GetAllBFCreate(cur, temp_result_to_create, reverse);
 	
@@ -384,7 +361,6 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::InsertCreateBFOperator_d
 	auto itr = replace_map_forward.find(plan_ptr);
 	bool insert_create_table = false;
 	if (itr != replace_map_forward.end()) {
-		std::cout << "Find in forward!" << std::endl;
 		insert_create_table = true;
 		auto ptr = itr->second.get();
 		while (ptr->children.size() != 0) {
@@ -395,7 +371,6 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::InsertCreateBFOperator_d
 	}
 	auto itr_next = replace_map_backward.find(plan_ptr);
 	if (itr_next != replace_map_backward.end()) {
-		std::cout << "Find in backward!" << std::endl;
 		insert_create_table = true;
 		auto ptr_next = itr_next->second.get();
 		while (ptr_next->children.size() != 0) {

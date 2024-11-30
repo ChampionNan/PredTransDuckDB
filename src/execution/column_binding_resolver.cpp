@@ -26,7 +26,6 @@ void ColumnBindingResolver::VisitOperator(LogicalOperator &op) {
 		// first get the bindings of the LHS and resolve the LHS expressions
 		VisitOperator(*comp_join.children[0]);
 		for (auto &cond : comp_join.conditions) {
-			std::cout << "comp_join_left.conditions: " << cond.left->ToString() << std::endl;
 			VisitExpression(&cond.left);
 		}
 		// visit the duplicate eliminated columns on the LHS, if any
@@ -36,7 +35,6 @@ void ColumnBindingResolver::VisitOperator(LogicalOperator &op) {
 		// then get the bindings of the RHS and resolve the RHS expressions
 		VisitOperator(*comp_join.children[1]);
 		for (auto &cond : comp_join.conditions) {
-			std::cout << "comp_join_right.conditions: " << cond.right->ToString() << std::endl;
 			VisitExpression(&cond.right);
 		}
 		// finally update the bindings with the result bindings of the join
@@ -108,13 +106,6 @@ void ColumnBindingResolver::VisitOperator(LogicalOperator &op) {
 		VisitOperatorExpressions(op);
 		return;
 	}
-	/*
-	case LogicalOperatorType::LOGICAL_PROJECTION: {
-		//: Add for bloom_filter replace semijoin
-		VisitOperatorChildren(op);
-		bindings = op.GetColumnBindings();
-		return;
-	}*/
 	case LogicalOperatorType::LOGICAL_INSERT: {
 		//! We want to execute the normal path, but also add a dummy 'excluded' binding if there is a
 		// ON CONFLICT DO UPDATE clause

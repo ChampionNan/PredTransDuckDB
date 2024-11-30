@@ -78,8 +78,6 @@ void Optimizer::Verify(LogicalOperator &op) {
 }
 
 unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p) {
-	// std::cout << "At whole Optimize! " << std::endl;
-	// auto total_start = std::chrono::high_resolution_clock::now();
 	Verify(*plan_p);
 
 	switch (plan_p->type) {
