@@ -463,7 +463,11 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::ReplaceSemiWithBF(unique
 	}
 	return op;
 }
+/*
+unique_ptr<LogicalOperator> PredicateTransferOptimizer::PushDownBF(unique_ptr<LogicalOperator> op) {
 
+}
+*/
 // /* Only for microbenchmark */
 // unique_ptr<LogicalOperator> PredicateTransferOptimizer::InsertCreateTable(unique_ptr<LogicalOperator> plan, LogicalOperator* plan_ptr) {
 // 	if(plan_ptr->type != LogicalOperatorType::LOGICAL_GET && plan_ptr->type != LogicalOperatorType::LOGICAL_FILTER) {

@@ -1,6 +1,7 @@
 #include "duckdb/parallel/pipeline_executor.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/common/limits.hpp"
+#include<iostream>
 
 #ifdef DUCKDB_DEBUG_ASYNC_SINK_SOURCE
 #include <thread>
@@ -166,6 +167,8 @@ SinkNextBatchType PipelineExecutor::NextBatch(duckdb::DataChunk &source_chunk) {
 
 PipelineExecuteResult PipelineExecutor::Execute(idx_t max_chunks) {
 	D_ASSERT(pipeline.sink);
+	std::cout << "PipelineExecutor::Execute" << std::endl;
+	pipeline.Print();
 	auto &source_chunk = pipeline.operators.empty() ? final_chunk : *intermediate_chunks[0];
 	for (idx_t i = 0; i < max_chunks; i++) {
 		if (context.client.interrupted) {
