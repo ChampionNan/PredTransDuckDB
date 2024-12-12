@@ -139,6 +139,10 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 	std::cout << "Plan2 Begin " << std::endl;
 	plan->Print();
 	std::cout << "Plan2 End " << std::endl;
+	// plan = PT.UseBfPushDown(std::move(plan));
+	// std::cout << "Plan3 Begin " << std::endl;
+	// plan->Print();
+	// std::cout << "Plan3 End " << std::endl;
 	
 	// auto end2 = std::chrono::high_resolution_clock::now();
 	// std::cout << "PT-Opt Time: " << std::chrono::duration_cast<std::chrono::microseconds>(end1 - start1).count() << " µs" << std::endl;

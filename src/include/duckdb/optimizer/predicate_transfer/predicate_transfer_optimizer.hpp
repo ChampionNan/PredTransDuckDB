@@ -19,6 +19,8 @@ public:
 
     unique_ptr<LogicalOperator> ReplaceSemiWithBF(unique_ptr<LogicalOperator> op);
 
+    unique_ptr<LogicalOperator> UseBfPushDown(unique_ptr<LogicalOperator> op);
+
     // unique_ptr<LogicalOperator> PushDownBF(unique_ptr<LogicalOperator> op);
     
 private:   

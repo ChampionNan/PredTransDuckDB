@@ -463,6 +463,31 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::ReplaceSemiWithBF(unique
 	}
 	return op;
 }
+
+unique_ptr<LogicalOperator> PredicateTransferOptimizer::UseBfPushDown(unique_ptr<LogicalOperator> op) {
+	op->Print();
+	if (op->type == LogicalOperatorType::LOGICAL_USE_BF) {
+		// 1. remove create_bf operator
+		unique_ptr<LogicalOperator> create_bf = std::move(op->children[1]);
+		op->children.erase(op->children.begin() + 1);
+		op->AddChild(std::move(create_bf->children[0]));
+		create_bf->children.erase(create_bf->children.begin());
+		// 2. insert to the bottom
+		auto itr = op->children[1].get();
+		while (itr->children.size() != 0 && itr->children[0] && itr->children[0]->children.size() != 0 && itr->children[0]->children[0]) {
+			itr = itr->children[0].get();
+		}
+		create_bf->AddChild(std::move(itr->children[0]));
+		itr->children.erase(itr->children.begin());
+		itr->AddChild(std::move(create_bf));
+	} else {
+		for (auto &child : op->children) {
+			child = UseBfPushDown(std::move(child));
+		}
+	}
+	return op;
+}
+
 /*
 unique_ptr<LogicalOperator> PredicateTransferOptimizer::PushDownBF(unique_ptr<LogicalOperator> op) {
 
