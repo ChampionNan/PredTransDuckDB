@@ -446,6 +446,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::ReplaceSemiWithEXT(uniqu
 		auto &join = op->Cast<LogicalComparisonJoin>();
 		if (join.join_type == JoinType::SEMI) {
 			auto ext_op = make_uniq<LogicalExtensionOperator>();
+			ext_op->conditions = std::move(join.conditions);
 			ext_op->AddChild(std::move(join.children[0]));
 			ext_op->AddChild(std::move(join.children[1]));
 			op = std::move(ext_op);

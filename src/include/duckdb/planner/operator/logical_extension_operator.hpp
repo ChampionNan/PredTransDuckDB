@@ -26,6 +26,9 @@ public:
 	    : LogicalOperator(LogicalOperatorType::LOGICAL_EXTENSION_OPERATOR, std::move(expressions)) {
 	}
 
+	//! The conditions of the join
+	vector<JoinCondition> conditions;
+
 	virtual void Serialize(Serializer &serializer) const override;
 	static unique_ptr<LogicalOperator> Deserialize(Deserializer &deserializer);
 

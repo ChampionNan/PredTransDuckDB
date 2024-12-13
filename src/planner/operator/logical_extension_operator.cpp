@@ -16,16 +16,25 @@ namespace duckdb {
 void LogicalExtensionOperator::ResolveColumnBindings(ColumnBindingResolver &res, vector<ColumnBinding> &bindings) {
 	// general case
 	// first visit the children of this operator
+	/*
 	for (auto &child : children) {
 		res.VisitOperator(*child);
 	}
 	// now visit the expressions of this operator to resolve any bound column references
 	for (auto &expression : expressions) {
 		res.VisitExpression(&expression);
+	}*/
+	res.VisitOperator(*children[1]);
+	for (auto &cond : conditions) {
+		res.VisitExpression(&cond.right);
+	}
+	res.VisitOperator(*children[0]);
+	for (auto &cond : conditions) {
+		res.VisitExpression(&cond.left);
 	}
 	// finally update the current set of bindings to the current set of column bindings
-	bindings = children[0]->GetColumnBindings();
-	// bindings = GetColumnBindings();
+	// bindings = children[0]->GetColumnBindings();
+	bindings = GetColumnBindings();
 }
 
 void LogicalExtensionOperator::Serialize(Serializer &serializer) const {
