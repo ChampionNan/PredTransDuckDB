@@ -4,6 +4,13 @@
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 
+#include "duckdb/planner/operator/logical_execute.hpp"
+#include "duckdb/execution/physical_operator.hpp"
+#include "duckdb/execution/operator/helper/physical_extension.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/execution/operator/helper/physical_execute.hpp"
+
 namespace duckdb {
 
 void LogicalExtensionOperator::ResolveColumnBindings(ColumnBindingResolver &res, vector<ColumnBinding> &bindings) {
@@ -17,7 +24,8 @@ void LogicalExtensionOperator::ResolveColumnBindings(ColumnBindingResolver &res,
 		res.VisitExpression(&expression);
 	}
 	// finally update the current set of bindings to the current set of column bindings
-	bindings = GetColumnBindings();
+	bindings = children[0]->GetColumnBindings();
+	// bindings = GetColumnBindings();
 }
 
 void LogicalExtensionOperator::Serialize(Serializer &serializer) const {
@@ -34,6 +42,14 @@ unique_ptr<LogicalOperator> LogicalExtensionOperator::Deserialize(Deserializer &
 		}
 	}
 	throw SerializationException("No deserialization method exists for extension: " + extension_name);
+}
+
+void LogicalExtensionOperator::ResolveTypes() {
+	types = children[0]->types;
+}
+
+vector<ColumnBinding> LogicalExtensionOperator::GetColumnBindings() {
+	return children[0]->GetColumnBindings();
 }
 
 string LogicalExtensionOperator::GetExtensionName() const {

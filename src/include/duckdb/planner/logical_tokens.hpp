@@ -59,4 +59,6 @@ class LogicalUpdate;
 class LogicalUseBF;
 class LogicalWindow;
 
+struct LogicalExtensionOperator;
+
 } // namespace duckdb

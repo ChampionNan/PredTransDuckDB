@@ -29,9 +29,14 @@ public:
 	virtual void Serialize(Serializer &serializer) const override;
 	static unique_ptr<LogicalOperator> Deserialize(Deserializer &deserializer);
 
-	virtual unique_ptr<PhysicalOperator> CreatePlan(ClientContext &context, PhysicalPlanGenerator &generator) = 0;
+	// virtual unique_ptr<PhysicalOperator> CreatePlan(LogicalExtensionOperator &op);
 
 	virtual void ResolveColumnBindings(ColumnBindingResolver &res, vector<ColumnBinding> &bindings);
 	virtual string GetExtensionName() const;
+
+	vector<ColumnBinding> GetColumnBindings() override;
+
+protected:
+	void ResolveTypes() override;
 };
 } // namespace duckdb

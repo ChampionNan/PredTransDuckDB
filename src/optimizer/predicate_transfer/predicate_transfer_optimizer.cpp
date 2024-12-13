@@ -3,6 +3,7 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_delim_get.hpp"
 #include "duckdb/planner/operator/logical_use_bf.hpp"
+#include "duckdb/planner/operator/logical_extension_operator.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
@@ -59,6 +60,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 		}
 	}	
 	//Backward
+	/*
 	for(int i = 0; i < ordered_nodes.size(); i++) {
         auto &current_node = ordered_nodes[i];
 		std::cout << "Back Current Node: " << i << ' ' << current_node->GetName() << std::endl;
@@ -74,7 +76,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 			// Such as, the column not involved in the predicate
 		 	dag_manager.Add(BF.first, BF.second, true);
 		}
-	}
+	}*/
 	auto result = InsertCreateBFOperator_d(std::move(plan));
 	// auto result = InsertCreateBFOperator(std::move(plan));
 	std::cout << "Alter Plan Begin " << std::endl;
@@ -131,9 +133,10 @@ vector<pair<idx_t, shared_ptr<BlockedBloomFilter>>> PredicateTransferOptimizer::
 		if(temp_result_to_create.size() == 0) {
 			return result;
 		} else {
+			/*
 			if(!PossibleFilterAny(node, reverse)) {
 				return result;
-			}
+			}*/
 			auto create_bf = BuildSingleCreateOperator(node, temp_result_to_create);
 			for (auto &filter : create_bf->bf_to_create) {
 				result.emplace_back(make_pair(cur, filter));
@@ -435,6 +438,23 @@ bool PredicateTransferOptimizer::PossibleFilterAny(LogicalOperator &node, bool r
 		}
 	}
 	return true;
+}
+
+unique_ptr<LogicalOperator> PredicateTransferOptimizer::ReplaceSemiWithEXT(unique_ptr<LogicalOperator> op) {
+	// 1. judge type
+	if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &join = op->Cast<LogicalComparisonJoin>();
+		if (join.join_type == JoinType::SEMI) {
+			auto ext_op = make_uniq<LogicalExtensionOperator>();
+			ext_op->AddChild(std::move(join.children[0]));
+			ext_op->AddChild(std::move(join.children[1]));
+			op = std::move(ext_op);
+		}
+	}
+	for (auto &child : op->children) {
+		child = ReplaceSemiWithEXT(std::move(child));
+	}
+	return op;
 }
 
 // /* Only for microbenchmark */

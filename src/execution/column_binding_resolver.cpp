@@ -8,6 +8,7 @@
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_use_bf.hpp"
 #include "duckdb/planner/operator/logical_create_bf.hpp"
+#include "duckdb/planner/operator/logical_extension_operator.hpp"
 #include "duckdb/planner/operator/logical_create_index.hpp"
 #include "duckdb/planner/operator/logical_extension_operator.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
@@ -143,7 +144,7 @@ void ColumnBindingResolver::VisitOperator(LogicalOperator &op) {
 				}
 			}
 			if(bf->BoundColsBuilt.size() == 0) {
-				throw InternalException("No bound colmun found!");
+				throw InternalException("No bound colmun found create_bf!");
 			}
 		}
 		bindings = op.GetColumnBindings();
@@ -162,7 +163,7 @@ void ColumnBindingResolver::VisitOperator(LogicalOperator &op) {
 				}
 			}
 			if(bf->BoundColsApplied.size() == 0) {
-				throw InternalException("No bound colmun found!");
+				throw InternalException("No bound colmun found use_bf!");
 			}
 		}
 		bindings = op.GetColumnBindings();

@@ -19,6 +19,7 @@
 #include "duckdb/planner/operator/logical_simple.hpp"
 #include "duckdb/planner/operator/logical_create_bf.hpp"
 #include "duckdb/planner/operator/logical_use_bf.hpp"
+#include "duckdb/planner/operator/logical_extension_operator.hpp"
 
 namespace duckdb {
 
