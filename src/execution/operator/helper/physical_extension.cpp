@@ -5,24 +5,46 @@
 
 namespace duckdb {
 
-PhysicalExtension::PhysicalExtension(PhysicalOperator &plan1, PhysicalOperator &plan2)
-    : PhysicalOperator(PhysicalOperatorType::EXTENSION, plan1.types, -1), plan1(plan1), plan2(plan2) {
+PhysicalExtension::PhysicalExtension(vector<LogicalType> types, idx_t estimated_cardinality)
+    : CachingPhysicalOperator(PhysicalOperatorType::EXTENSION, std::move(types), estimated_cardinality){
+}
+
+unique_ptr<OperatorState> PhysicalExtension::GetOperatorState(ExecutionContext &context) const {
+	return make_uniq<CachingOperatorState>();
 }
 
 vector<const_reference<PhysicalOperator>> PhysicalExtension::GetChildren() const {
-	return {plan1, plan2};
+	vector<const_reference<PhysicalOperator>> result;
+	for (auto &child : children) {
+		result.push_back(*child);
+	}
+	return result;
 }
 
 void PhysicalExtension::BuildPipelines(Pipeline &current, MetaPipeline &meta_pipeline) {
-    this->op_state.reset();
-	this->sink_state.reset();
+	op_state.reset();
 
-	// 'current' is the probe pipeline: add this operator
 	auto &state = meta_pipeline.GetState();
+	
 	state.AddPipelineOperator(current, *this);
-    auto &child_meta_pipeline = meta_pipeline.CreateChildMetaPipeline(current, *this);
-	child_meta_pipeline.Build(plan2);
-    plan1.BuildPipelines(current, meta_pipeline);
+	children[0]->BuildPipelines(current, meta_pipeline);
 }
+
+vector<const_reference<PhysicalOperator>> PhysicalExtension::GetSources() const {
+	return children[0]->GetSources();
+}
+
+string PhysicalExtension::ParamsToString() const {
+	string result;
+	return result;
+}
+
+OperatorResultType PhysicalExtension::ExecuteInternal(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
+	GlobalOperatorState &gstate, OperatorState &state_p) const {
+	auto &state = state_p.Cast<CachingOperatorState>();
+	chunk.Reference(input);
+	return OperatorResultType::NEED_MORE_INPUT;
+}
+
 
 } // namespace duckdb

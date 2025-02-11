@@ -5,21 +5,32 @@
 
 namespace duckdb {
 
-class PhysicalExtension : public PhysicalOperator {
+class PhysicalExtension : public CachingPhysicalOperator {
 public:
 	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::EXTENSION;
 
-public:
-	explicit PhysicalExtension(PhysicalOperator &plan1, PhysicalOperator &plan2);
+	explicit PhysicalExtension(vector<LogicalType> types, idx_t estimated_cardinality);
 
-	PhysicalOperator &plan1;
-	PhysicalOperator &plan2;
+	/* Operator interface */
+	unique_ptr<OperatorState> GetOperatorState(ExecutionContext &context) const override;
 
-public:
+	bool ParallelOperator() const override {
+		return true;
+	}
+
+	string ParamsToString() const override;
+
 	vector<const_reference<PhysicalOperator>> GetChildren() const override;
 
-public:
 	void BuildPipelines(Pipeline &current, MetaPipeline &meta_pipeline) override;
+
+	vector<const_reference<PhysicalOperator>> GetSources() const override;
+
+protected:
+	OperatorResultType ExecuteInternal(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
+	                                   GlobalOperatorState &gstate, OperatorState &state) const override;
+
+	
 };
 
 } // namespace duckdb

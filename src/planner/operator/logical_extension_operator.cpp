@@ -11,6 +11,7 @@
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/execution/operator/helper/physical_execute.hpp"
 
+
 namespace duckdb {
 
 void LogicalExtensionOperator::ResolveColumnBindings(ColumnBindingResolver &res, vector<ColumnBinding> &bindings) {
@@ -24,13 +25,16 @@ void LogicalExtensionOperator::ResolveColumnBindings(ColumnBindingResolver &res,
 	for (auto &expression : expressions) {
 		res.VisitExpression(&expression);
 	}*/
-	res.VisitOperator(*children[1]);
-	for (auto &cond : conditions) {
-		res.VisitExpression(&cond.right);
-	}
 	res.VisitOperator(*children[0]);
 	for (auto &cond : conditions) {
 		res.VisitExpression(&cond.left);
+	}
+	for (auto &expr : duplicate_eliminated_columns) {
+		res.VisitExpression(&expr);
+	}
+	res.VisitOperator(*children[1]);
+	for (auto &cond : conditions) {
+		res.VisitExpression(&cond.right);
 	}
 	// finally update the current set of bindings to the current set of column bindings
 	// bindings = children[0]->GetColumnBindings();

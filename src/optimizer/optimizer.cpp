@@ -135,9 +135,6 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 	plan = PT.Optimize(std::move(plan));
 	std::cout << "PT Optimize Plan: " << std::endl;
 	plan->Print();
-	plan = PT.ReplaceSemiWithEXT(std::move(plan));
-	std::cout << "Replaced Plan: " << std::endl;
-	plan->Print();
 	// auto end2 = std::chrono::high_resolution_clock::now();
 	// std::cout << "PT-Opt Time: " << std::chrono::duration_cast<std::chrono::microseconds>(end1 - start1).count() << " µs" << std::endl;
 
@@ -219,6 +216,10 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 			optimizer_extension.optimize_function(context, optimizer_extension.optimizer_info.get(), plan);
 		});
 	}
+
+	plan = PT.ReplaceSemiWithEXT(std::move(plan));
+	std::cout << "Replaced Plan: " << std::endl;
+	plan->Print();
 
 	// auto total_end = std::chrono::high_resolution_clock::now();
 	// std::cout << "Total Opt Time: " << std::chrono::duration_cast<std::chrono::microseconds>(total_end - total_start).count() << " µs" << std::endl;

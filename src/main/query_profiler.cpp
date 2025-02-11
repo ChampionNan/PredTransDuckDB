@@ -108,6 +108,7 @@ bool QueryProfiler::OperatorRequiresProfiling(PhysicalOperatorType op_type) {
 	case PhysicalOperatorType::EMPTY_RESULT:
 	case PhysicalOperatorType::USE_BF:
 	case PhysicalOperatorType::CREATE_BF:
+	case PhysicalOperatorType::EXTENSION:
 		return true;
 	default:
 		return false;

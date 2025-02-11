@@ -28,6 +28,7 @@ public:
 
 	//! The conditions of the join
 	vector<JoinCondition> conditions;
+	vector<unique_ptr<Expression>> duplicate_eliminated_columns;
 
 	virtual void Serialize(Serializer &serializer) const override;
 	static unique_ptr<LogicalOperator> Deserialize(Deserializer &deserializer);

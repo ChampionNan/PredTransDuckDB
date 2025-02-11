@@ -127,7 +127,7 @@ string LogicalOperatorToString(LogicalOperatorType type) {
 	case LogicalOperatorType::LOGICAL_INVALID:
 		break;
 	case LogicalOperatorType::LOGICAL_EXTENSION_OPERATOR:
-		return "CUSTOM_OP";
+		return "EXTENSION";
 	case LogicalOperatorType::LOGICAL_PIVOT:
 		return "PIVOT";
 	case LogicalOperatorType::LOGICAL_USE_BF:

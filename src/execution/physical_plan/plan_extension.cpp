@@ -9,7 +9,9 @@ namespace duckdb {
     unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalExtensionOperator &op) {
 	    unique_ptr<PhysicalOperator> plan1 = CreatePlan(*op.children[0]);
 	    unique_ptr<PhysicalOperator> plan2 = CreatePlan(*op.children[1]);
-	    auto ext = make_uniq<PhysicalExtension>(*plan1, *plan2);
+	    auto ext = make_uniq<PhysicalExtension>(plan1->types, op.estimated_cardinality);
+		ext->children.emplace_back(std::move(plan1));
+		ext->children.emplace_back(std::move(plan2));
 	    unique_ptr<PhysicalOperator> plan = std::move(ext);
 	    return plan;
     }
