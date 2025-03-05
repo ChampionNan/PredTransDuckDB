@@ -8,6 +8,8 @@
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/list.hpp"
 
+#include "duckdb/optimizer/predicate_transfer/setting.hpp"
+
 namespace duckdb {
 
 static bool HasJoin(LogicalOperator *op) {
@@ -48,10 +50,15 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOpera
 		plan_enumerator.InitLeafPlans();
 
 		// Ask the plan enumerator to enumerate a number of join orders
-		// auto final_plan = plan_enumerator.SolveJoinOrder();
+#ifdef ExactLeftDeep
 		auto final_plan = plan_enumerator.SolveJoinOrderLeftDeep();
-		// auto final_plan = plan_enumerator.SolveJoinOrderRandom();
-		// auto final_plan = plan_enumerator.SolveJoinOrderLeftDeepRandom();
+#elif defined(RandomBushy)
+		auto final_plan = plan_enumerator.SolveJoinOrderRandom();
+#elif defined(RandomLeftDeep)
+		auto final_plan = plan_enumerator.SolveJoinOrderLeftDeepRandom();
+#else
+		auto final_plan = plan_enumerator.SolveJoinOrder();
+#endif
 		// TODO: add in the check that if no plan exists, you have to add a cross product.
 
 		// now reconstruct a logical plan from the query graph plan

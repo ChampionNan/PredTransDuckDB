@@ -27,6 +27,8 @@
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/planner.hpp"
 
+#include "duckdb/optimizer/predicate_transfer/setting.hpp"
+
 namespace duckdb {
 
 Optimizer::Optimizer(Binder &binder, ClientContext &context) : context(context), binder(binder), rewriter(context) {
@@ -117,12 +119,14 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		plan = deliminator.Optimize(std::move(plan));
 	});
 
+	// plan->Print();
+
 	// then we start the first phase of predicate transfer optimization,
 	// building the transfer graph
-	// auto start1 = std::chrono::high_resolution_clock::now();
+#ifdef PredicateTransfer
 	PredicateTransferOptimizer PT(context);
 	plan = PT.PreOptimize(std::move(plan));
-	// auto end1 = std::chrono::high_resolution_clock::now();
+#endif
 
 	// then we perform the join ordering optimization
 	// this also rewrites cross products + filters into joins and performs filter pushdowns
@@ -132,9 +136,9 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		plan = optimizer.Optimize(std::move(plan));
 	});
 
+#ifdef PredicateTransfer
 	plan = PT.Optimize(std::move(plan));
-	// auto end2 = std::chrono::high_resolution_clock::now();
-	// std::cout << "PT-Opt Time: " << std::chrono::duration_cast<std::chrono::microseconds>(end1 - start1).count() << " µs" << std::endl;
+#endif
 
 	// rewrites UNNESTs in DelimJoins by moving them to the projection
 	RunOptimizer(OptimizerType::UNNEST_REWRITER, [&]() {
@@ -167,11 +171,11 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 
 	// perform statistics propagation
 	column_binding_map_t<unique_ptr<BaseStatistics>> statistics_map;
-	RunOptimizer(OptimizerType::STATISTICS_PROPAGATION, [&]() {
-		StatisticsPropagator propagator(*this);
-		propagator.PropagateStatistics(plan);
-		statistics_map = propagator.GetStatisticsMap();
-	});
+	// RunOptimizer(OptimizerType::STATISTICS_PROPAGATION, [&]() {
+	// 	StatisticsPropagator propagator(*this);
+	// 	propagator.PropagateStatistics(plan);
+	// 	statistics_map = propagator.GetStatisticsMap();
+	// });
 
 	// creates projection maps so unused columns are projected out early
 	RunOptimizer(OptimizerType::COLUMN_LIFETIME, [&]() {

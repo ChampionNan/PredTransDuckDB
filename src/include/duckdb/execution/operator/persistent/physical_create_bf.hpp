@@ -3,8 +3,12 @@
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/optimizer/predicate_transfer/hash_filter/hash_filter.hpp"
 #include "duckdb/optimizer/predicate_transfer/bloom_filter/bloom_filter.hpp"
+#include "duckdb/common/radix_partitioning.hpp"
+#include "duckdb/storage/temporary_memory_manager.hpp"
 
 namespace duckdb {
+class CreateBFGlobalSinkState;
+
 class PhysicalCreateBF : public PhysicalOperator {
 public:
 	static constexpr const PhysicalOperatorType TYPE = PhysicalOperatorType::CREATE_BF;
@@ -47,6 +51,8 @@ public:
 	
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override;
 
+	bool LoadInMem(idx_t num_partitions, idx_t max_partition_size, CreateBFGlobalSinkState &sink) const;
+
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context, OperatorSinkFinalizeInput &input) const override;
 
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
@@ -69,5 +75,6 @@ public:
 
 private:
     idx_t counter = 0;
+	shared_ptr<idx_t> count_for_debug;
 };
 }
