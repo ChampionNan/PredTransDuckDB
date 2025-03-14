@@ -3,6 +3,7 @@
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/assert.hpp"
+#include <iostream>
 
 namespace duckdb {
 
@@ -75,6 +76,7 @@ void QueryGraphEdges::CreateEdge(JoinRelationSet &left, JoinRelationSet &right, 
 		n->filters.push_back(filter_info);
 	}
 	info->neighbors.push_back(std::move(n));
+	// std::cout << "Created edge between " << left.ToString() << " and " << right.ToString() << std::endl;
 }
 
 void QueryGraphEdges::EnumerateNeighborsDFS(JoinRelationSet &node, reference<QueryEdge> info, idx_t index,

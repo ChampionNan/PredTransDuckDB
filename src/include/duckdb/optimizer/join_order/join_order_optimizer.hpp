@@ -18,6 +18,7 @@
 #include "duckdb/parser/expression_map.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/logical_operator_visitor.hpp"
+#include "duckdb/optimizer/join_order/plan_enumerator.hpp"
 
 #include <functional>
 
@@ -31,15 +32,29 @@ public:
 	//! Perform join reordering inside a plan
 	unique_ptr<LogicalOperator> Optimize(unique_ptr<LogicalOperator> plan, optional_ptr<RelationStats> stats = nullptr);
 
+	unique_ptr<LogicalOperator> OptimizeInitial(unique_ptr<LogicalOperator> plan);
+
 	unique_ptr<JoinNode> CreateJoinTree(JoinRelationSet &set,
 	                                    const vector<reference<NeighborInfo>> &possible_connections, JoinNode &left,
 	                                    JoinNode &right);
+
+	unique_ptr<LogicalOperator> CallSolveJoinOrderFixed(unique_ptr<LogicalOperator> plan, vector<LogicalOperator*> &exec_order);
+
+	const QueryGraphEdges &GetQueryGraphEdges() const {
+		return query_graph_manager.GetQueryGraphEdges();
+	}
 
 private:
 	ClientContext &context;
 
 	//! manages the query graph, relations, and edges between relations
 	QueryGraphManager query_graph_manager;
+
+	//! The cost model used for optimization
+    optional_ptr<CostModel> keep_cost_model;
+
+	//! The plan enumerator - keep it as member to reuse structures
+    unique_ptr<PlanEnumerator> keep_plan_enumerator;
 
 	//! The optimal join plan found for the specific JoinRelationSet*
 	unordered_map<JoinRelationSet *, unique_ptr<JoinNode>> plans;

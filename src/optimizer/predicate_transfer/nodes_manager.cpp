@@ -67,7 +67,9 @@ void NodesManager::AddNode(LogicalOperator *op) {
 		case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY: {
 			auto id = op->GetTableIndex()[1];
 			if (nodes.find(id) == nodes.end()) {
+				// FIXME: Remove aggregation node
 				nodes[id] = op;
+				break;
 			}
 			break;
 		}
@@ -79,7 +81,7 @@ void NodesManager::AddNode(LogicalOperator *op) {
 }
 
 void NodesManager::SortNodes() {
-    for(auto &node : nodes) {
+	for(auto &node : nodes) {
 		sort_nodes.emplace_back(node.second);
 	}
 	sort(sort_nodes.begin(), sort_nodes.end(), NodesManager::nodesCmp);
@@ -120,7 +122,9 @@ void NodesManager::ExtractNodes(LogicalOperator &plan, vector<reference<LogicalO
     while (op->children.size() == 1 && !OperatorNeedsRelation(op->type)) {
 		if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
 			if (op->children[0]->type == LogicalOperatorType::LOGICAL_GET) {
+				// FIXME: Change to add its child node
 				AddNode(op);
+				// AddNode(op->children[0].get());
 				return;
 			}
 			else if (op->expressions[0]->type == ExpressionType::OPERATOR_NOT
@@ -203,7 +207,7 @@ void NodesManager::ExtractNodes(LogicalOperator &plan, vector<reference<LogicalO
 	case LogicalOperatorType::LOGICAL_ANY_JOIN:
 	case LogicalOperatorType::LOGICAL_ASOF_JOIN: {
 		ExtractNodes(*op->children[0], filter_operators);
-		ExtractNodes(*op->children[1], filter_operators);
+        ExtractNodes(*op->children[1], filter_operators);
 		return;
 	}
 	case LogicalOperatorType::LOGICAL_DUMMY_SCAN: {

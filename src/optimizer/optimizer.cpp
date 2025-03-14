@@ -119,7 +119,20 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		plan = deliminator.Optimize(std::move(plan));
 	});
 
-	// plan->Print();
+	// then we perform the join ordering optimization
+	// this also rewrites cross products + filters into joins and performs filter pushdowns
+	// auto start2 = std::chrono::high_resolution_clock::now();
+	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
+		JoinOrderOptimizer optimizer(context);
+		plan = optimizer.Optimize(std::move(plan));
+		std::cout << "After First Join Order Plan " << std::endl;
+		plan->Print();
+#ifdef PLAN_DEBUG
+		std::cout << "GetQueryGraphEdges1: " << std::endl;
+		std::cout << optimizer.GetQueryGraphEdges().ToString() << std::endl;
+#endif // PLAN_DEBUG
+		
+	});
 
 	// then we start the first phase of predicate transfer optimization,
 	// building the transfer graph
@@ -128,16 +141,26 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 	plan = PT.PreOptimize(std::move(plan));
 #endif
 
-	// then we perform the join ordering optimization
-	// this also rewrites cross products + filters into joins and performs filter pushdowns
-	// auto start2 = std::chrono::high_resolution_clock::now();
+#ifdef YANPLUS
+	auto BFOrder = PT.GetBFOrder();
+	std::cout << "BFOrder Size: " << BFOrder.size() << std::endl;
+	for (auto &node : BFOrder) {
+		std::cout << "BFOrder Node: " << node->ParamsToString() << std::endl;
+	}
+
 	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
-		JoinOrderOptimizer optimizer(context);
-		plan = optimizer.Optimize(std::move(plan));
+		JoinOrderOptimizer optimizer2(context);
+		plan = optimizer2.CallSolveJoinOrderFixed(std::move(plan), BFOrder);
+		std::cout << "After Second Join Order Plan Begin " << std::endl;
+		plan->Print();
 	});
+#endif
 
 #ifdef PredicateTransfer
 	plan = PT.Optimize(std::move(plan));
+	std::cout << "After PT Plan " << std::endl;
+	plan->Print();
+	PT.PrintUseBFAndRelatedCreate(plan);
 #endif
 
 	// rewrites UNNESTs in DelimJoins by moving them to the projection

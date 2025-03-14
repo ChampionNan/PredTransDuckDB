@@ -39,6 +39,7 @@ public:
 	unique_ptr<JoinNode> SolveJoinOrderLeftDeep();
 	unique_ptr<JoinNode> SolveJoinOrderRandom();
 	unique_ptr<JoinNode> SolveJoinOrderLeftDeepRandom();
+	unique_ptr<JoinNode> SolveJoinOrderFixed(vector<LogicalOperator*> &exec_order);
 	void InitLeafPlans();
 
 	static unique_ptr<LogicalOperator> BuildSideProbeSideSwaps(unique_ptr<LogicalOperator> plan);
