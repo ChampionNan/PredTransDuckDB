@@ -8,6 +8,8 @@
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/list.hpp"
 
+#include "duckdb/optimizer/predicate_transfer/setting.hpp"
+
 namespace duckdb {
 
 static bool HasJoin(LogicalOperator *op) {
@@ -22,9 +24,51 @@ static bool HasJoin(LogicalOperator *op) {
 	return false;
 }
 
-unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOperator> plan,
-                                                         optional_ptr<RelationStats> stats) {
-    std::cout << "At JoinOrderOptimizer Optimize!" << std::endl;
+unique_ptr<LogicalOperator> JoinOrderOptimizer::OptimizeInitial(unique_ptr<LogicalOperator> plan) {
+    // make sure query graph manager has not extracted a relation graph already
+	std::cout << "At JoinOrderOptimizer OptimizeInitial!" << std::endl;
+    LogicalOperator *op = plan.get();
+
+    // extract the relations that go into the hyper graph.
+    bool reorderable = query_graph_manager.Build(*op);
+
+    auto relation_stats = query_graph_manager.relation_manager.GetRelationStats();
+    unique_ptr<LogicalOperator> new_logical_plan = nullptr;
+
+    if (reorderable) {
+        // Always create and keep the instances for later reuse in OptimizeInitial
+        keep_cost_model = make_uniq<CostModel>(query_graph_manager);
+        keep_plan_enumerator = make_uniq<PlanEnumerator>(query_graph_manager, *keep_cost_model, query_graph_manager.GetQueryGraphEdges());
+    
+        keep_plan_enumerator->InitLeafPlans();
+
+#ifdef ExactLeftDeep
+        auto final_plan = keep_plan_enumerator->SolveJoinOrderLeftDeep();
+#elif defined(RandomBushy)
+        auto final_plan = keep_plan_enumerator->SolveJoinOrderRandom();
+#elif defined(RandomLeftDeep)
+        auto final_plan = keep_plan_enumerator->SolveJoinOrderLeftDeepRandom();
+#else
+        auto final_plan = keep_plan_enumerator->SolveJoinOrder();
+#endif
+        new_logical_plan = query_graph_manager.Reconstruct(std::move(plan), *final_plan);
+    } else {
+        new_logical_plan = std::move(plan);
+        if (relation_stats.size() == 1) {
+            new_logical_plan->estimated_cardinality = relation_stats.at(0).cardinality;
+            new_logical_plan->has_estimated_cardinality = true;
+        }
+    }
+
+    if (HasJoin(new_logical_plan.get())) {
+        new_logical_plan = query_graph_manager.LeftRightOptimizations(std::move(new_logical_plan));
+    }
+
+    return new_logical_plan;
+}
+
+unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOperator> plan, optional_ptr<RelationStats> stats) {
+
 	// make sure query graph manager has not extracted a relation graph already
 	LogicalOperator *op = plan.get();
 
@@ -32,9 +76,19 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOpera
 	// We optimize the children of any non-reorderable operations we come across.
 	bool reorderable = query_graph_manager.Build(*op);
 
+	// std::cout << "Print Relations in JoinOrderOptimizer::Optimize: " << std::endl;
+	// query_graph_manager.relation_manager.PrintRelations();
+	
+
 	// get relation_stats here since the reconstruction process will move all of the relations.
 	auto relation_stats = query_graph_manager.relation_manager.GetRelationStats();
 	unique_ptr<LogicalOperator> new_logical_plan = nullptr;
+
+	// Debug: Print all edges in query graph
+    // std::cout << "Dumping all query graph edges in Optimize:" << std::endl;
+    // const auto &query_graph = query_graph_manager.GetQueryGraphEdges();
+    // std::cout << query_graph.ToString() << std::endl; // Use ToString() which is const-qualified
+
 
 	if (reorderable) {
 		// query graph now has filters and relations
@@ -48,10 +102,15 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOpera
 		plan_enumerator.InitLeafPlans();
 
 		// Ask the plan enumerator to enumerate a number of join orders
-		// auto final_plan = plan_enumerator.SolveJoinOrder();
+#ifdef ExactLeftDeep
 		auto final_plan = plan_enumerator.SolveJoinOrderLeftDeep();
-		// auto final_plan = plan_enumerator.SolveJoinOrderRandom();
-		// auto final_plan = plan_enumerator.SolveJoinOrderLeftDeepRandom();
+#elif defined(RandomBushy)
+		auto final_plan = plan_enumerator.SolveJoinOrderRandom();
+#elif defined(RandomLeftDeep)
+		auto final_plan = plan_enumerator.SolveJoinOrderLeftDeepRandom();
+#else
+		auto final_plan = plan_enumerator.SolveJoinOrder();
+#endif
 		// TODO: add in the check that if no plan exists, you have to add a cross product.
 
 		// now reconstruct a logical plan from the query graph plan
@@ -78,6 +137,69 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOpera
 		auto new_stats = RelationStatisticsHelper::CombineStatsOfReorderableOperator(bindings, relation_stats);
 		new_stats.cardinality = cardinality;
 		RelationStatisticsHelper::CopyRelationStats(*stats, new_stats);
+	}
+
+	return new_logical_plan;
+}
+
+unique_ptr<LogicalOperator> JoinOrderOptimizer::CallSolveJoinOrderFixed(unique_ptr<LogicalOperator> plan, vector<LogicalOperator*> &exec_order) {
+
+	// make sure query graph manager has not extracted a relation graph already
+	LogicalOperator *op = plan.get();
+
+	// extract the relations that go into the hyper graph.
+	// We optimize the children of any non-reorderable operations we come across.
+	bool reorderable = query_graph_manager.Build(*op, false);
+
+	// get relation_stats here since the reconstruction process will move all of the relations.
+	auto relation_stats = query_graph_manager.relation_manager.GetRelationStats();
+
+	unique_ptr<LogicalOperator> new_logical_plan = nullptr;
+
+#ifdef PLAN_DEBUG
+	std::cout << "Print Relations in JoinOrderOptimizer::CallSolveJoinOrderFixed: " << std::endl;
+	query_graph_manager.relation_manager.PrintRelations();
+	// Debug: Print all edges in query graph
+    std::cout << "Dumping all query graph edges in CallSolveJoinOrderFixed:" << std::endl;
+    const auto &query_graph = query_graph_manager.GetQueryGraphEdges();
+    std::cout << query_graph.ToString() << std::endl; // Use ToString() which is const-qualified
+
+	std::cout << "Relations in CallSolveJoinOrderFixed: " << std::endl;
+	for (idx_t i = 0; i < query_graph_manager.relation_manager.NumRelations(); i++) {
+		auto &relation = query_graph_manager.set_manager.GetJoinRelation(i);
+		std::cout << relation.ToString() << std::endl;
+	}
+#endif
+	if (reorderable) {
+		// query graph now has filters and relations
+		auto cost_model = CostModel(query_graph_manager);
+
+		// Initialize a plan enumerator.
+		auto plan_enumerator =
+		    PlanEnumerator(query_graph_manager, cost_model, query_graph_manager.GetQueryGraphEdges());
+
+		// Initialize the leaf/single node plans
+		plan_enumerator.InitLeafPlans();
+
+		// Ask the plan enumerator to enumerate a number of join orders
+		auto final_plan = plan_enumerator.SolveJoinOrderFixed(exec_order);
+		// TODO: add in the check that if no plan exists, you have to add a cross product.
+
+		// now reconstruct a logical plan from the query graph plan
+		new_logical_plan = query_graph_manager.Reconstruct(std::move(plan), *final_plan);
+	} else {
+		new_logical_plan = std::move(plan);
+		if (relation_stats.size() == 1) {
+			new_logical_plan->estimated_cardinality = relation_stats.at(0).cardinality;
+			new_logical_plan->has_estimated_cardinality = true;
+		}
+	}
+
+	// only perform left right optimizations when stats is null (means we have the top level optimize call)
+	// Don't check reorderability because non-reorderable joins will result in 1 relation, but we can
+	// still switch the children.
+	if (HasJoin(new_logical_plan.get())) {
+		new_logical_plan = query_graph_manager.LeftRightOptimizations(std::move(new_logical_plan));
 	}
 
 	return new_logical_plan;

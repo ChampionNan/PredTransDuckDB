@@ -18,6 +18,8 @@
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/logical_operator_visitor.hpp"
 
+#include <iostream>
+
 namespace duckdb {
 
 struct FilterInfo;
@@ -44,6 +46,9 @@ public:
 
 	bool ExtractJoinRelations(LogicalOperator &input_op, vector<reference<LogicalOperator>> &filter_operators,
 	                          optional_ptr<LogicalOperator> parent = nullptr);
+	bool ExtractJoinRelationsNonRecursive(LogicalOperator &input_op,
+	                          vector<reference<LogicalOperator>> &filter_operators,
+	                          optional_ptr<LogicalOperator> parent = nullptr);
 
 	//! for each join filter in the logical plan op, extract the relations that are referred to on
 	//! both sides of the join filter, along with the tables & indexes.
@@ -63,6 +68,13 @@ public:
 	unordered_map<idx_t, idx_t> relation_mapping;
 
 	void PrintRelationStats();
+
+	void PrintRelations() {
+		for (idx_t i = 0; i < relations.size(); i++) {
+			auto &relation = relations[i];
+			std::cout << relation->op.ToString() << std::endl;
+		}
+	};
 
 private:
 	ClientContext &context;

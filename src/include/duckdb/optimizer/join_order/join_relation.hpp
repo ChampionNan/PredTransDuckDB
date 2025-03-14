@@ -21,6 +21,8 @@ struct JoinRelationSet {
 
 	string ToString() const;
 
+	string ToString2() const;
+
 	unsafe_unique_array<idx_t> relations;
 	idx_t count;
 

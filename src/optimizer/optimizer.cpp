@@ -27,6 +27,8 @@
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/planner.hpp"
 
+#include "duckdb/optimizer/predicate_transfer/setting.hpp"
+
 namespace duckdb {
 
 Optimizer::Optimizer(Binder &binder, ClientContext &context) : context(context), binder(binder), rewriter(context) {
@@ -117,26 +119,49 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		plan = deliminator.Optimize(std::move(plan));
 	});
 
-	// then we start the first phase of predicate transfer optimization,
-	// building the transfer graph
-	// auto start1 = std::chrono::high_resolution_clock::now();
-	PredicateTransferOptimizer PT(context);
-	plan = PT.PreOptimize(std::move(plan));
-	// auto end1 = std::chrono::high_resolution_clock::now();
-
 	// then we perform the join ordering optimization
 	// this also rewrites cross products + filters into joins and performs filter pushdowns
 	// auto start2 = std::chrono::high_resolution_clock::now();
 	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
 		JoinOrderOptimizer optimizer(context);
 		plan = optimizer.Optimize(std::move(plan));
+		std::cout << "After First Join Order Plan " << std::endl;
+		plan->Print();
+#ifdef PLAN_DEBUG
+		std::cout << "GetQueryGraphEdges1: " << std::endl;
+		std::cout << optimizer.GetQueryGraphEdges().ToString() << std::endl;
+#endif // PLAN_DEBUG
+		
 	});
 
+	// then we start the first phase of predicate transfer optimization,
+	// building the transfer graph
+#ifdef PredicateTransfer
+	PredicateTransferOptimizer PT(context);
+	plan = PT.PreOptimize(std::move(plan));
+#endif
+
+#ifdef YANPLUS
+	auto BFOrder = PT.GetBFOrder();
+	std::cout << "BFOrder Size: " << BFOrder.size() << std::endl;
+	for (auto &node : BFOrder) {
+		std::cout << "BFOrder Node: " << node->ParamsToString() << std::endl;
+	}
+
+	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
+		JoinOrderOptimizer optimizer2(context);
+		plan = optimizer2.CallSolveJoinOrderFixed(std::move(plan), BFOrder);
+		std::cout << "After Second Join Order Plan Begin " << std::endl;
+		plan->Print();
+	});
+#endif
+
+#ifdef PredicateTransfer
 	plan = PT.Optimize(std::move(plan));
-	// std::cout << "PT Optimize Plan: " << std::endl;
-	// plan->Print();
-	// auto end2 = std::chrono::high_resolution_clock::now();
-	// std::cout << "PT-Opt Time: " << std::chrono::duration_cast<std::chrono::microseconds>(end1 - start1).count() << " µs" << std::endl;
+	std::cout << "After PT Plan " << std::endl;
+	plan->Print();
+	PT.PrintUseBFAndRelatedCreate(plan);
+#endif
 
 	// rewrites UNNESTs in DelimJoins by moving them to the projection
 	RunOptimizer(OptimizerType::UNNEST_REWRITER, [&]() {
@@ -169,11 +194,11 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 
 	// perform statistics propagation
 	column_binding_map_t<unique_ptr<BaseStatistics>> statistics_map;
-	RunOptimizer(OptimizerType::STATISTICS_PROPAGATION, [&]() {
-		StatisticsPropagator propagator(*this);
-		propagator.PropagateStatistics(plan);
-		statistics_map = propagator.GetStatisticsMap();
-	});
+	// RunOptimizer(OptimizerType::STATISTICS_PROPAGATION, [&]() {
+	// 	StatisticsPropagator propagator(*this);
+	// 	propagator.PropagateStatistics(plan);
+	// 	statistics_map = propagator.GetStatisticsMap();
+	// });
 
 	// creates projection maps so unused columns are projected out early
 	RunOptimizer(OptimizerType::COLUMN_LIFETIME, [&]() {

@@ -17,7 +17,7 @@ idx_t NodesManager::NumNodes() {
     return nodes.size();
 }
 
-column_t NodesManager::GetTableIndexinFilter(LogicalOperator *op) {
+idx_t NodesManager::GetTableIndexinFilter(LogicalOperator *op) {
 	if (op->children[0]->type == LogicalOperatorType::LOGICAL_GET) {
 		return op->children[0]->Cast<LogicalGet>().GetTableIndex()[0];
 	} else if (op->children[0]->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
@@ -51,16 +51,26 @@ void NodesManager::AddNode(LogicalOperator *op) {
 		case LogicalOperatorType::LOGICAL_UNION:
 		case LogicalOperatorType::LOGICAL_EXCEPT:
 		case LogicalOperatorType::LOGICAL_INTERSECT: {
-			nodes[op->GetTableIndex()[0]] = op;
+			auto id = op->GetTableIndex()[0];
+			if (nodes.find(id) == nodes.end()) {
+				nodes[id] = op;
+			}
 			break;
 		}
 		case LogicalOperatorType::LOGICAL_FILTER: {
-			column_t children = GetTableIndexinFilter(op);
-			nodes[children] = op;
+			auto id = GetTableIndexinFilter(op);
+			if (nodes.find(id) == nodes.end()) {
+				nodes[id] = op;
+			}
 			break;
 		}
 		case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY: {
-			nodes[op->GetTableIndex()[1]] = op;
+			auto id = op->GetTableIndex()[1];
+			if (nodes.find(id) == nodes.end()) {
+				// FIXME: Remove aggregation node
+				nodes[id] = op;
+				break;
+			}
 			break;
 		}
 		default: {
@@ -71,7 +81,7 @@ void NodesManager::AddNode(LogicalOperator *op) {
 }
 
 void NodesManager::SortNodes() {
-    for(auto &node : nodes) {
+	for(auto &node : nodes) {
 		sort_nodes.emplace_back(node.second);
 	}
 	sort(sort_nodes.begin(), sort_nodes.end(), NodesManager::nodesCmp);
@@ -103,16 +113,29 @@ void NodesManager::EraseNode(idx_t key) {
 	auto itr = nodes.erase(key);
 }
 
+bool can_add_mark = true;
+
 /* Extract All the vertex nodes */
 void NodesManager::ExtractNodes(LogicalOperator &plan, vector<reference<LogicalOperator>> &filter_operators) {
     LogicalOperator *op = &plan;
 	vector<reference<LogicalOperator>> datasource_filters;
     while (op->children.size() == 1 && !OperatorNeedsRelation(op->type)) {
 		if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
-			if (op->children[0]->type == LogicalOperatorType::LOGICAL_GET
-			|| op->children[0]->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+			if (op->children[0]->type == LogicalOperatorType::LOGICAL_GET) {
+				// FIXME: Change to add its child node
 				AddNode(op);
-			} else {
+				// AddNode(op->children[0].get());
+				return;
+			}
+			else if (op->expressions[0]->type == ExpressionType::OPERATOR_NOT
+			&& op->expressions[0]->expression_class == ExpressionClass::BOUND_OPERATOR
+			&& op->children[0]->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+				can_add_mark = false;
+				ExtractNodes(*op->children[0], filter_operators);
+				return;
+			}
+			else {
+				can_add_mark = true;
 				ExtractNodes(*op->children[0], filter_operators);
 				return;
 			}
@@ -127,21 +150,30 @@ void NodesManager::ExtractNodes(LogicalOperator &plan, vector<reference<LogicalO
 		|| join.join_type == JoinType::LEFT
 		|| join.join_type == JoinType::RIGHT
 		|| join.join_type == JoinType::SEMI
-		|| join.join_type == JoinType::RIGHT_SEMI
-		|| join.join_type == JoinType::MARK) {
+		|| join.join_type == JoinType::RIGHT_SEMI) {
 			for(auto &jc : join.conditions) {
 				if(jc.comparison == ExpressionType::COMPARE_EQUAL
 				&& jc.left->type == ExpressionType::BOUND_COLUMN_REF
 				&& jc.right->type == ExpressionType::BOUND_COLUMN_REF) {
 					filter_operators.push_back(*op);
-					// join_connected = true;
 					break;
 				}
 			}
-			
+		} else if (join.join_type == JoinType::MARK && can_add_mark) {
+			for(auto &jc : join.conditions) {
+				if(jc.comparison == ExpressionType::COMPARE_EQUAL
+				&& jc.left->type == ExpressionType::BOUND_COLUMN_REF
+				&& jc.right->type == ExpressionType::BOUND_COLUMN_REF) {
+					filter_operators.push_back(*op);
+					break;
+				}
+			}
+		}
+		if (!can_add_mark) {
+			can_add_mark = true;
 		}
 	}
-   
+    
     switch (op->type) {
 	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY: {
 		// TODO: Transfer Predicate through Group by columns
@@ -175,7 +207,7 @@ void NodesManager::ExtractNodes(LogicalOperator &plan, vector<reference<LogicalO
 	case LogicalOperatorType::LOGICAL_ANY_JOIN:
 	case LogicalOperatorType::LOGICAL_ASOF_JOIN: {
 		ExtractNodes(*op->children[0], filter_operators);
-		ExtractNodes(*op->children[1], filter_operators);
+        ExtractNodes(*op->children[1], filter_operators);
 		return;
 	}
 	case LogicalOperatorType::LOGICAL_DUMMY_SCAN: {
@@ -198,12 +230,6 @@ void NodesManager::ExtractNodes(LogicalOperator &plan, vector<reference<LogicalO
 		return;
 	}
 	case LogicalOperatorType::LOGICAL_PROJECTION: {
-		// Use for TPC-H and JOB
-		// RelationStats child_stats;
-		// PredicateTransferOptimizer optimizer(context);
-		// op->children[0] = optimizer.Optimize(std::move(op->children[0]), &child_stats);
-		// AddNode(op);
-		// Extension for TPC-DS
 		for (int i = 0; i < op->expressions.size(); i++) {
 			auto &expr = op->expressions[i];
 			if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
@@ -223,6 +249,7 @@ void NodesManager::ExtractNodes(LogicalOperator &plan, vector<reference<LogicalO
 	case LogicalOperatorType::LOGICAL_INTERSECT: {
 		AddNode(op);
 		ExtractNodes(*op->children[0], filter_operators);
+		ExtractNodes(*op->children[1], filter_operators);
 		return;
 	}
 	default:

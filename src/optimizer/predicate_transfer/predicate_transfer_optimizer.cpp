@@ -73,7 +73,8 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 			// Such as, the column not involved in the predicate
 		 	dag_manager.Add(BF.first, BF.second, true);
 		}
-	}*/
+	}
+	*/
 	auto result = InsertCreateBFOperator_d(std::move(plan));
 	// auto result = InsertCreateBFOperator(std::move(plan));
 	// std::cout << "Alter Plan Begin " << std::endl;
@@ -112,16 +113,16 @@ vector<pair<idx_t, shared_ptr<BlockedBloomFilter>>> PredicateTransferOptimizer::
 	}
 	// Use Bloom Filter
 	#ifdef UseHashFilter
-	std::cout << "In CreateBloomFilter UseHashFilter" << std::endl;
+	// std::cout << "In CreateBloomFilter UseHashFilter" << std::endl;
 	#else
-	std::cout << "In CreateBloomFilter UseBloomFilter" << std::endl;
+	// std::cout << "In CreateBloomFilter UseBloomFilter" << std::endl;
 	#endif
 	vector<idx_t> depend_nodes;
 	GetAllBFUsed(cur, temp_result_to_use, depend_nodes, reverse);
 	// std::cout << "GetAllBFUsed: " << temp_result_to_use.size() << std::endl;
 	// std::cout << "GetAllBFUsed: " << depend_nodes.size() << std::endl;
 	// for (auto &id : depend_nodes) {
-	//	std::cout << "Depend Nodes: " << id << std::endl;
+	// 	std::cout << "Depend Nodes: " << id << std::endl;
 	// }
 	// Create Bloom Filter
 	GetAllBFCreate(cur, temp_result_to_create, reverse);
@@ -437,31 +438,92 @@ bool PredicateTransferOptimizer::PossibleFilterAny(LogicalOperator &node, bool r
 	return true;
 }
 
-unique_ptr<LogicalOperator> PredicateTransferOptimizer::ReplaceSemiWithEXT(unique_ptr<LogicalOperator> op) {
-	// 1. judge type
-	if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
-		auto &join = op->Cast<LogicalComparisonJoin>();
-		if (join.join_type == JoinType::SEMI) {
-			auto ext_op = make_uniq<LogicalExtensionOperator>();
-			ext_op->conditions = std::move(join.conditions);
-			ext_op->duplicate_eliminated_columns = std::move(join.duplicate_eliminated_columns);
-			ext_op->AddChild(std::move(join.children[0]));
-			ext_op->AddChild(std::move(join.children[1]));
-			op = std::move(ext_op);
+vector<LogicalOperator*> PredicateTransferOptimizer::GetBFOrder() {
+	vector<LogicalOperator*> result;
+	for(auto &node : dag_manager.getExecOrder()) {
+		switch(node->type) {
+			case LogicalOperatorType::LOGICAL_GET:
+			case LogicalOperatorType::LOGICAL_DELIM_GET:{
+				result.emplace_back(node);
+				break;
+			}
+			case LogicalOperatorType::LOGICAL_FILTER: {
+				if (node->children[0]->type == LogicalOperatorType::LOGICAL_GET) {
+					result.emplace_back(node->children[0].get());
+				}
+				break;
+			}
+			default: {
+				break;
+			}
 		}
-		/* else if (join.join_type == JoinType::RIGHT_SEMI) {
-			auto ext_op = make_uniq<LogicalExtensionOperator>();
-			ext_op->conditions = std::move(join.conditions);
-			ext_op->duplicate_eliminated_columns = std::move(join.duplicate_eliminated_columns);
-			ext_op->AddChild(std::move(join.children[1]));
-			ext_op->AddChild(std::move(join.children[0]));
-			op = std::move(ext_op);
-		}*/
 	}
-	for (auto &child : op->children) {
-		child = ReplaceSemiWithEXT(std::move(child));
-	}
-	return op;
+	return result;
+}
+
+
+void PredicateTransferOptimizer::PrintUseBFAndRelatedCreate(const unique_ptr<LogicalOperator> &plan) {
+    // Helper function to print binding info using DAG nodes
+    auto print_binding_info = [&](const ColumnBinding &binding) {
+        std::cout << binding.ToString() << " (";
+        auto it = dag_manager.nodes_manager.getNodes().find(binding.table_index);
+        if (it != dag_manager.nodes_manager.getNodes().end()) {
+            auto &op = it->second;
+            if (op->type == LogicalOperatorType::LOGICAL_GET) {
+                auto &get = op->Cast<LogicalGet>();
+                std::cout << "table: " << get.function.to_string(get.bind_data.get());
+                if (binding.column_index < get.names.size()) {
+                    std::cout << ", column: " << get.names[binding.column_index];
+                }
+            } else {
+				std::cout << "Info: " << op->ParamsToString();
+			}
+        } else {
+            std::cout << "table_index: " << binding.table_index << " not found";
+        }
+        std::cout << ") ";
+    };
+
+    if (plan->type == LogicalOperatorType::LOGICAL_USE_BF) {
+        auto &use_bf = plan->Cast<LogicalUseBF>();
+        std::cout << "Found UseBF Node:" << std::endl;
+        std::cout << "  Used on tables: ";
+        for (const auto& bf : use_bf.bf_to_use) {
+            for (const auto& binding : bf->column_bindings_applied_) {
+                print_binding_info(binding);
+            }
+        }
+        std::cout << std::endl;
+        
+        std::cout << "  Related CreateBF nodes:" << std::endl;
+        for (const auto& create_bf : use_bf.related_create_bf) {
+            std::cout << "    Built on tables: ";
+            for (const auto& bf : create_bf->bf_to_create) {
+                for (const auto& binding : bf->column_bindings_built_) {
+                    print_binding_info(binding);
+                }
+            }
+            std::cout << std::endl;
+        }
+        std::cout << std::endl;
+    }
+
+    // Recursively traverse children
+    for (const auto &child : plan->children) {
+        PrintUseBFAndRelatedCreate(child);
+    }
+}
+
+void PredicateTransferOptimizer::PrintDAGManager() {
+    std::cout << "\n=== DAG Manager Contents ===\n" << std::endl;
+    // Print execution order
+    auto& exec_order = dag_manager.getExecOrder();
+	std::cout << "Execution Order:" << std::endl;
+    for (size_t i = 0; i < exec_order.size(); i++) {
+        auto op = exec_order[i];
+        std::cout << i << ": " << op->GetName() << " " << op->ParamsToString() << std::endl;
+    }
+    std::cout << "\n=== End DAG Manager Contents ===\n" << std::endl;
 }
 
 // /* Only for microbenchmark */

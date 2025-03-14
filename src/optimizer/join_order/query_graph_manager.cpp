@@ -11,6 +11,8 @@
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/list.hpp"
 
+#include "duckdb/optimizer/predicate_transfer/setting.hpp"
+
 namespace duckdb {
 
 //! Returns true if A and B are disjoint, false otherwise
@@ -21,11 +23,16 @@ static bool Disjoint(const unordered_set<T> &a, const unordered_set<T> &b) {
 	});
 }
 
-bool QueryGraphManager::Build(LogicalOperator &op) {
+bool QueryGraphManager::Build(LogicalOperator &op, bool recursive) {
 	vector<reference<LogicalOperator>> filter_operators;
 	// have the relation manager extract the join relations and create a reference list of all the
 	// filter operators.
-	auto can_reorder = relation_manager.ExtractJoinRelations(op, filter_operators);
+	bool can_reorder;
+	if (recursive) {
+		can_reorder = relation_manager.ExtractJoinRelations(op, filter_operators);
+	} else {
+		can_reorder = relation_manager.ExtractJoinRelationsNonRecursive(op, filter_operators);
+	}
 	auto num_relations = relation_manager.NumRelations();
 	if (num_relations <= 1 || !can_reorder) {
 		// nothing to optimize/reorder
@@ -302,7 +309,6 @@ unique_ptr<LogicalOperator> QueryGraphManager::RewritePlan(unique_ptr<LogicalOpe
 	for (auto &relation : relation_manager.GetRelations()) {
 		extracted_relations.push_back(ExtractJoinRelation(relation));
 	}
-
 	// now we generate the actual joins
 	auto join_tree = GenerateJoins(extracted_relations, node);
 	// perform the final pushdown of remaining filters
@@ -361,6 +367,7 @@ void QueryGraphManager::TryFlipChildren(LogicalOperator &op, idx_t cardinality_r
 	if (rhs_cardinality < lhs_cardinality * cardinality_ratio) {
 		return;
 	}
+
 	FlipChildren(op);
 }
 
@@ -374,10 +381,19 @@ unique_ptr<LogicalOperator> QueryGraphManager::LeftRightOptimizations(unique_ptr
 				auto &join = op->Cast<LogicalComparisonJoin>();
 
 				switch (join.join_type) {
-				case JoinType::INNER:
-				case JoinType::OUTER:
+				case JoinType::INNER: {
+#if defined(ExactLeftDeep) || defined(RandomBushy) || defined(RandomLeftDeep)
+					if (join.children[0]->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || join.children[1]->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+						break;
+					}
+#endif
 					TryFlipChildren(join);
 					break;
+				}
+				case JoinType::OUTER: {
+					TryFlipChildren(join);
+					break;
+				}
 				case JoinType::LEFT:
 				case JoinType::RIGHT:
 					if (join.right_projection_map.empty()) {

@@ -7,6 +7,7 @@
 namespace duckdb {
 class PredicateTransferOptimizer {
 public:
+
     explicit PredicateTransferOptimizer(ClientContext &context) : context(context), dag_manager(context) {
 	}
 
@@ -18,7 +19,16 @@ public:
 
     unique_ptr<LogicalOperator> InsertCreateBFOperator_d(unique_ptr<LogicalOperator> plan);
 
-    unique_ptr<LogicalOperator> ReplaceSemiWithEXT(unique_ptr<LogicalOperator> op);
+
+    void CollectUseBFAndRelatedCreate(const unique_ptr<LogicalOperator> &plan);
+
+    void PrintUseBFAndRelatedCreate(const unique_ptr<LogicalOperator> &plan);
+
+    void PrintDAGManager();
+
+    void PrintBFPairs();
+
+    vector<LogicalOperator*> GetBFOrder();
     
 private:   
 	ClientContext &context;
@@ -65,5 +75,6 @@ private:
     bool PossibleFilterAny(LogicalOperator &node, bool reverse);
 
     unique_ptr<LogicalOperator> InsertCreateTable(unique_ptr<LogicalOperator> plan, LogicalOperator* plan_ptr);
+
 };
 }

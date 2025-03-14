@@ -4,6 +4,7 @@
 #include "duckdb/common/to_string.hpp"
 
 #include <algorithm>
+#include <iostream>
 
 namespace duckdb {
 
@@ -17,6 +18,15 @@ string JoinRelationSet::ToString() const {
 	return result;
 }
 // LCOV_EXCL_STOP
+
+string JoinRelationSet::ToString2() const {
+	string result = "JoinRelationSets:[\n";
+	for (int i = 0; i < count; i++) {
+		result += to_string(relations[i]) + ", ";
+	}
+	result += ']\n';
+	return result;
+}
 
 //! Returns true if sub is a subset of super
 bool JoinRelationSet::IsSubset(JoinRelationSet &super, JoinRelationSet &sub) {

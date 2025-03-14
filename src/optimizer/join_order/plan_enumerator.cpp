@@ -503,7 +503,6 @@ void PlanEnumerator::InitLeafPlans() {
 	// nodes of the join tree NOTE: we can just use pointers to JoinRelationSet* here because the GetJoinRelation
 	// function ensures that a unique combination of relations will have a unique JoinRelationSet object.
 	// first initialize equivalent relations based on the filters
-	std::cout << "InitLeafPlans! " << std::endl;
 	auto relation_stats = query_graph_manager.relation_manager.GetRelationStats();
 
 	cost_model.cardinality_estimator.InitEquivalentRelations(query_graph_manager.GetFilterBindings());
@@ -525,7 +524,6 @@ void PlanEnumerator::InitLeafPlans() {
 // Moerkotte and Thomas Neumannn, see that paper for additional info/documentation bonus slides:
 // https://db.in.tum.de/teaching/ws1415/queryopt/chapter3.pdf?lang=de
 unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrder() {
-	std::cout << "SolverJoinOrder! " << std::endl;
 	bool force_no_cross_product = query_graph_manager.context.config.force_no_cross_product;
 	// first try to solve the join order exactly
 	if (!SolveJoinOrderExactly()) {
@@ -559,91 +557,32 @@ unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrder() {
 }
 
 unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderLeftDeep() {
-	vector<reference<JoinRelationSet>> join_relations; // T in the paper
-	for (idx_t i = 0; i < query_graph_manager.relation_manager.NumRelations(); i++) {
-		join_relations.push_back(query_graph_manager.set_manager.GetJoinRelation(i));
+	vector<vector<JoinRelationSet*>> join_rels(query_graph_manager.relation_manager.NumRelations());
+	for (int i = 0; i < query_graph_manager.relation_manager.NumRelations(); i++) {
+		join_rels[0].push_back(&query_graph_manager.set_manager.GetJoinRelation(i));
 	}
-	optional_ptr<JoinNode> best_left_tree = nullptr;
-	while (join_relations.size() > 0) {
-		idx_t best_left = 0, best_right = 0;
-		optional_ptr<JoinNode> best_connection;
-		int cnt = 0;
-		while (true) {
-			if (best_left_tree == nullptr) {
-				double max = 0;
-				int i = -1;
-				for(int k = 0; k < join_relations.size(); k++) {
-					auto card = cost_model.cardinality_estimator.EstimateCardinalityWithSet<double>(join_relations[k]);
-					if (card > max) {
-						i = k;
-						max = card;
-					}
-				}
-				double min = 1.7976931348623158e+308;
-				int j = -1;
-				for(int k = 0; k < join_relations.size(); k++) {
-					if (k == i) {
-						continue;
-					}
-					auto card = cost_model.cardinality_estimator.EstimateCardinalityWithSet<double>(join_relations[k]);
-					if (card < min) {
-						auto connection = query_graph.GetConnections(join_relations[i], join_relations[k]);
-						if (!connection.empty()) {
-							j = k;
-							min = card;
+	for (int join_size = 1; join_size < query_graph_manager.relation_manager.NumRelations(); join_size++) {
+		for (int left_idx = 0; left_idx < join_rels[join_size - 1].size(); left_idx++) {
+			auto &left = join_rels[join_size - 1][left_idx];
+			for (int right_idx = 0; right_idx < join_rels[0].size(); right_idx++) {
+				auto &right = join_rels[0][right_idx];
+				if (!JoinRelationSet::IsSubset(*left, *right)) {
+					auto connection = query_graph.GetConnections(*left, *right);
+					if (!connection.empty()) {
+						auto &new_set = query_graph_manager.set_manager.Union(*left, *right);
+						bool add2join_rels = false;
+						if(plans.find(new_set) == plans.end()) {
+							add2join_rels = true;
 						}
-					}
-				}
-				auto left = join_relations[i];
-				auto right = join_relations[j];
-				// check if we can connect these two relations
-				auto connection = query_graph.GetConnections(left, right);
-				if (!connection.empty()) {
-					auto &node = EmitPair(left, right, connection);
-					UpdateDPTree(node);
-					best_connection = &node;
-					best_left = i;
-					best_right = j;
-					if (best_right > best_left) {
-						join_relations.erase(join_relations.begin() + best_right);
-						join_relations.erase(join_relations.begin() + best_left);
-					} else {
-						join_relations.erase(join_relations.begin() + best_left);
-						join_relations.erase(join_relations.begin() + best_right);
-					}
-					break;
-				}
-			} else {
-				double min = 1.7976931348623158e+308;
-				int i = -1;
-				for(int k = 0; k < join_relations.size(); k++) {
-					auto card = cost_model.cardinality_estimator.EstimateCardinalityWithSet<double>(join_relations[k]);
-					if (card < min) {
-						auto connection = query_graph.GetConnections(best_left_tree->set, join_relations[k]);
-						if (!connection.empty()) {
-							i = k;
-							min = card;
+						auto &node = EmitPair(*left, *right, connection);
+						if (add2join_rels) {
+							join_rels[join_size].push_back(&node.set);
 						}
+						UpdateDPTree(node);
 					}
-				}
-				auto right = join_relations[i];
-				// check if we can connect these two relations
-				auto connection = query_graph.GetConnections(best_left_tree->set, right);
-				if (!connection.empty()) {
-					auto &node = EmitPair(best_left_tree->set, right, connection);
-					UpdateDPTree(node);
-					best_connection = &node;
-					best_right = i;
-					join_relations.erase(join_relations.begin() + best_right);
-					break;
 				}
 			}
-			cnt++;
 		}
-		if (!best_connection) {
-			throw InvalidInputException("Query requires a cross-product");
-		}
-		best_left_tree = best_connection;
 	}
 	// now the optimal join path should have been found
 	// get it from the node
@@ -798,5 +737,95 @@ unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderLeftDeepRandom() {
 	auto &total_relation = query_graph_manager.set_manager.GetJoinRelation(bindings);
 	auto final_plan = plans.find(total_relation);
 	return std::move(final_plan->second);
+}
+
+unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderFixed(vector<LogicalOperator*> &exec_order) {
+    if (exec_order.empty()) {
+        return nullptr;
+    }
+    vector<reference<JoinRelationSet>> join_relations; // T in the paper
+
+    for (auto &op : exec_order) {
+        auto table_index = op->GetTableIndex()[0];
+        auto relation_index = query_graph_manager.relation_manager.relation_mapping[table_index];
+        join_relations.push_back(query_graph_manager.set_manager.GetJoinRelation(relation_index));
+		// std::cout << "Op: \n" << op->ToString() << " LogicalOperator Index: " << table_index << " JoinNode Index: " << relation_index << std::endl;
+		// std::cout << join_relations.back().get().ToString() << std::endl;
+    }
+#ifdef PLAN_DEBUG
+    std::cout << "Edges: \n" << std::endl;
+    for (idx_t i = 0; i < query_graph_manager.relation_manager.NumRelations(); i++) {
+        auto &relation1 = query_graph_manager.set_manager.GetJoinRelation(i);
+        for (idx_t j = 0; j < query_graph_manager.relation_manager.NumRelations(); j++) {
+            if (i != j) {
+                auto &relation2 = query_graph_manager.set_manager.GetJoinRelation(j);
+                auto connections = query_graph.GetConnections(relation1, relation2);
+                if (!connections.empty()) {
+                    std::cout << "Connection between " << relation1.ToString() << " and " << relation2.ToString() << std::endl;
+                }
+            }
+        }
+    }
+#endif // DEBUG PLAN_DEBUG
+    // Start with the first relation in join_relations
+    auto current_set = &join_relations[0].get();
+    
+    // Create a vector of indices of remaining relations to process
+    vector<size_t> remaining_indices;
+    for (size_t i = 1; i < join_relations.size(); i++) {
+        remaining_indices.push_back(i);
+    }
+
+    unique_ptr<JoinNode> last_node = nullptr;
+
+	std::cout << "\nStart Root Set: " << current_set->ToString() << std::endl;
+
+    while (!remaining_indices.empty()) {
+        bool found_connection = false;
+
+        // Try each remaining relation to find one that can connect to current_set
+        for (size_t idx = 0; idx < remaining_indices.size(); idx++) {
+            size_t i = remaining_indices[idx];
+            auto next_set = &join_relations[i].get();
+            // Check if we can connect these sets
+            auto connection = query_graph.GetConnections(*current_set, *next_set);
+            if (!connection.empty()) {
+                // Directly create a join node
+                auto left_plan = plans.find(*current_set);
+                auto right_plan = plans.find(*next_set);
+                if (left_plan == plans.end() || right_plan == plans.end()) {
+                    throw InternalException("No left or right plan: internal error in join order optimizer");
+                }
+                
+                optional_ptr<NeighborInfo> best_connection = nullptr;
+                if (!connection.empty()) {
+                    best_connection = &connection.back().get();
+                }
+                
+                // Create a new JoinNode using the existing JoinNodes
+                auto new_set = &query_graph_manager.set_manager.Union(*current_set, *next_set);
+                last_node = make_uniq<JoinNode>(*new_set, best_connection, *left_plan->second, *right_plan->second, 0);
+                current_set = &last_node->set;
+                plans[*new_set] = std::move(last_node);
+                // Remove the connected relation index from remaining_indices
+                remaining_indices.erase(remaining_indices.begin() + idx);
+                found_connection = true;
+                break;
+            }
+        }
+
+        if (!found_connection) {
+            std::cout << "No valid connection found, stopping." << std::endl;
+            break;
+        }
+    }
+
+    if (remaining_indices.empty() && current_set) {
+		auto final_plan = plans.find(*current_set);
+		if (final_plan != plans.end()) {
+			return std::move(final_plan->second);
+		}
+	}
+	return nullptr;
 }
 } // namespace duckdb
