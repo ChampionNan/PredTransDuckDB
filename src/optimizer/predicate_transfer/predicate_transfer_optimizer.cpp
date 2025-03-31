@@ -22,6 +22,8 @@
 #include "duckdb/catalog/catalog_search_path.hpp"
 #include <set>
 
+#include "duckdb/optimizer/predicate_transfer/setting.hpp"
+
 namespace duckdb {
 std::unordered_map<std::string, int> PredicateTransferOptimizer::table_exists;
 
@@ -60,7 +62,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 		}
 	}	
 	//Backward
-	/*
+#ifdef PredicateTransfer
 	for(int i = 0; i < ordered_nodes.size(); i++) {
         auto &current_node = ordered_nodes[i];
 		// We do predicate transfer in the function CreateBloomFilter
@@ -74,7 +76,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 		 	dag_manager.Add(BF.first, BF.second, true);
 		}
 	}
-	*/
+#endif
 	auto result = InsertCreateBFOperator_d(std::move(plan));
 	// auto result = InsertCreateBFOperator(std::move(plan));
 	// std::cout << "Alter Plan Begin " << std::endl;

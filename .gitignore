@@ -346,6 +346,7 @@ extension/extension_config_local.cmake
 extension_external
 1G
 50G
+*100*
 job_csv
 social-network-sf10-merged-fk
 test_db*

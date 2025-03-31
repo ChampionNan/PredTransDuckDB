@@ -1,4 +1,5 @@
 #include "duckdb/planner/operator/logical_create_bf.hpp"
+#include "duckdb/optimizer/predicate_transfer/setting.hpp"
 
 namespace duckdb {
 #ifdef UseHashFilter

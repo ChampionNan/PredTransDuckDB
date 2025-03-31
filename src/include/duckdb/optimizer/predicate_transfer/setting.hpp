@@ -1,6 +1,7 @@
 // Exclusive
 // #define BloomJoin
 #define PredicateTransfer
+// #define UseHashFilter
 
 // Exclusive
 // #define ExactLeftDeep

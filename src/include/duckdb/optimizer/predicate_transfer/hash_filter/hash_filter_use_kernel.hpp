@@ -3,6 +3,8 @@
 #include "duckdb/optimizer/predicate_transfer/hash_filter/hash_filter.hpp"
 #include "duckdb/common/types/vector.hpp"
 
+#include "duckdb/optimizer/predicate_transfer/setting.hpp"
+
 #ifdef UseHashFilter
 namespace duckdb {
 /**

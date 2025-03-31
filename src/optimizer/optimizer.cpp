@@ -242,13 +242,11 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		});
 	}
 
-	// ! Our implementation: replace semi-join with extension operator
-	plan = PT.ReplaceSemiWithEXT(std::move(plan));
-	std::cout << "Final Plan: " << std::endl;
-	plan->Print();
-
 	// auto total_end = std::chrono::high_resolution_clock::now();
 	// std::cout << "Total Opt Time: " << std::chrono::duration_cast<std::chrono::microseconds>(total_end - total_start).count() << " µs" << std::endl;
+
+	std::cout << "After Optimize Plan " << std::endl;
+	plan->Print();
 
 	Planner::VerifyPlan(context, plan);
 

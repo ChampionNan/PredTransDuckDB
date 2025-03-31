@@ -2,6 +2,8 @@
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 
+#include "duckdb/optimizer/predicate_transfer/setting.hpp"
+
 #ifdef UseHashFilter
 namespace duckdb {
 

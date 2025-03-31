@@ -6,6 +6,8 @@
 #include "duckdb/common/radix_partitioning.hpp"
 #include "duckdb/storage/temporary_memory_manager.hpp"
 
+#include "duckdb/optimizer/predicate_transfer/setting.hpp"
+
 namespace duckdb {
 class CreateBFGlobalSinkState;
 
