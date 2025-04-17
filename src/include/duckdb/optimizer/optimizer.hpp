@@ -27,6 +27,8 @@ public:
 	//! Return a reference to the client context of this optimizer
 	ClientContext &GetContext();
 
+	void PrintOperatorBindings(LogicalOperator* op, const string& prefix = "");
+
 	ClientContext &context;
 	Binder &binder;
 	ExpressionRewriter rewriter;

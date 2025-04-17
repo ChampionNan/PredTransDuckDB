@@ -24,12 +24,14 @@
 #include "duckdb/optimizer/statistics_propagator.hpp"
 #include "duckdb/optimizer/topn_optimizer.hpp"
 #include "duckdb/optimizer/unnest_rewriter.hpp"
+#include "duckdb/optimizer/aggregation_pushdown.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/planner.hpp"
 
 #include "duckdb/optimizer/predicate_transfer/setting.hpp"
 
 namespace duckdb {
+
 
 Optimizer::Optimizer(Binder &binder, ClientContext &context) : context(context), binder(binder), rewriter(context) {
 	rewriter.rules.push_back(make_uniq<ConstantFoldingRule>(rewriter));
@@ -169,11 +171,30 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		plan = unnest_rewriter.Optimize(std::move(plan));
 	});
 
+#ifdef YANPLUSAGG
+	std::cout << "Before AGGREGATION_PUSHDOWN Plan " << std::endl;
+	plan->Print();
+	std::cout << "Before AGGREGATION_PUSHDOWN Plan, Print binding" << std::endl;
+	PrintOperatorBindings(plan.get());
+
+	RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
+		AggregationPushdown aggregation_pushdown(binder, context);
+		plan = aggregation_pushdown.Rewrite(std::move(plan));
+	});
+	std::cout << "After AddAnnotAttributeDFS! Binding" << std::endl;
+	plan->Print();
+	PrintOperatorBindings(plan.get());
+#endif
+
 	// removes unused columns
 	RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
 		RemoveUnusedColumns unused(binder, context, true);
 		unused.VisitOperator(*plan);
 	});
+
+	std::cout << "After RemoveUnusedColumns! Binding" << std::endl;
+	plan->Print();
+	PrintOperatorBindings(plan.get());
 
 	RunOptimizer(OptimizerType::IN_CLAUSE, [&]() {
 		InClauseRewriter ic_rewriter(context, *this);
@@ -205,6 +226,9 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		ColumnLifetimeAnalyzer column_lifetime(true);
 		column_lifetime.VisitOperator(*plan);
 	});
+	std::cout << "After ColumnLifetimeAnalyzer1! Binding" << std::endl;
+	plan->Print();
+	PrintOperatorBindings(plan.get());
 
 	// remove duplicate aggregates
 	RunOptimizer(OptimizerType::COMMON_AGGREGATE, [&]() {
@@ -217,6 +241,10 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		ColumnLifetimeAnalyzer column_lifetime(true);
 		column_lifetime.VisitOperator(*plan);
 	});
+
+	std::cout << "After ColumnLifetimeAnalyzer2! Binding" << std::endl;
+	plan->Print();
+	PrintOperatorBindings(plan.get());
 
 	// compress data based on statistics for materializing operators
 	RunOptimizer(OptimizerType::COMPRESSED_MATERIALIZATION, [&]() {
@@ -242,15 +270,144 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		});
 	}
 
+#ifdef YANPLUSAGG
+	std::cout << "Before AGGREGATION_PUSHDOWN Join projection prune " << std::endl;
+	plan->Print();
+	PrintOperatorBindings(plan.get());
+	RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
+		AggregationPushdown aggregation_pushdown(binder, context);
+		plan = aggregation_pushdown.PruneAggregationColumns(std::move(plan));
+	});
+#endif
+
+	std::cout << "After All Optimizations Plan " << std::endl;
+	plan->Print();
+	PrintOperatorBindings(plan.get());
+
 	// auto total_end = std::chrono::high_resolution_clock::now();
 	// std::cout << "Total Opt Time: " << std::chrono::duration_cast<std::chrono::microseconds>(total_end - total_start).count() << " µs" << std::endl;
-
-	std::cout << "After Optimize Plan " << std::endl;
-	plan->Print();
 
 	Planner::VerifyPlan(context, plan);
 
 	return std::move(plan);
+}
+
+void Optimizer::PrintOperatorBindings(LogicalOperator* op, const string& prefix) {
+    if (!op) return;
+    
+    // First collect all base tables and column_ids mappings from the operator tree
+    std::unordered_map<idx_t, std::tuple<string, vector<string>, vector<column_t>>> table_map;
+    std::function<void(const LogicalOperator*)> collect_tables = [&](const LogicalOperator* node) {
+        if (!node) return;
+        
+        if (node->type == LogicalOperatorType::LOGICAL_GET) {
+            auto& get = (const LogicalGet&)(*node);
+            table_map[get.table_index] = {get.function.to_string(get.bind_data.get()), get.names, get.column_ids};
+        }
+        
+        for (auto& child : node->children) {
+            collect_tables(child.get());
+        }
+    };
+    
+    collect_tables(op);
+    std::cout << "=================================================================" << std::endl;
+    // Print operator type
+    std::cout << prefix << "Operator: " << LogicalOperatorToString(op->type) << std::endl;
+    
+    // If this is a join, print join conditions
+    if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+        auto& join = op->Cast<LogicalComparisonJoin>();
+        // Print left projection map
+        std::cout << prefix << "Left Projection Map: ";
+        if (!join.left_projection_map.empty()) {
+            std::cout << "[";
+            for (idx_t i = 0; i < join.left_projection_map.size(); i++) {
+                if (i > 0) std::cout << ", ";
+                std::cout << join.left_projection_map[i];
+            }
+            std::cout << "]" << std::endl;
+        } else {
+            std::cout << "empty (all columns preserved)" << std::endl;
+        }
+    
+        // Print right projection map
+        std::cout << prefix << "Right Projection Map: ";
+        if (!join.right_projection_map.empty()) {
+            std::cout << "[";
+            for (idx_t i = 0; i < join.right_projection_map.size(); i++) {
+                if (i > 0) std::cout << ", ";
+                std::cout << join.right_projection_map[i];
+            }
+            std::cout << "]" << std::endl;
+        } else {
+            std::cout << "empty (all columns preserved)" << std::endl;
+        }
+        std::cout << prefix << "Join Conditions:" << std::endl;
+        for (auto& condition : join.conditions) {
+            std::cout << prefix << "  - Left: " << condition.left->ToString() << std::endl;
+            
+            if (condition.left->type == ExpressionType::BOUND_COLUMN_REF) {
+                auto& left_col = condition.left->Cast<BoundColumnRefExpression>();
+                std::cout << prefix << "    Left binding: [" << left_col.binding.table_index 
+                          << "." << left_col.binding.column_index << "]" << std::endl;
+            }
+            
+            std::cout << prefix << "    Right: " << condition.right->ToString() << std::endl;
+            
+            if (condition.right->type == ExpressionType::BOUND_COLUMN_REF) {
+                auto& right_col = condition.right->Cast<BoundColumnRefExpression>();
+                std::cout << prefix << "    Right binding: [" << right_col.binding.table_index 
+                          << "." << right_col.binding.column_index << "]" << std::endl;
+            }
+            
+            std::cout << prefix << "    Comparison: " << EnumUtil::ToChars(condition.comparison) << std::endl;
+        }
+    }
+    // Print column bindings with table info
+    auto bindings = op->GetColumnBindings();
+    std::cout << prefix << "Column Bindings: " << std::endl;
+    for (size_t i = 0; i < bindings.size(); i++) {
+        auto& binding = bindings[i];
+        std::cout << prefix << "    [" << i << "] " << binding.table_index << "." 
+                  << binding.column_index;
+        
+        // If this is a table we know about
+        if (table_map.find(binding.table_index) != table_map.end()) {
+            auto& [table_name, column_names, column_ids] = table_map[binding.table_index];
+            std::cout << " (Table: " << table_name;
+            
+            // For LogicalGet operators, use column_ids to get the actual column
+            if (!column_ids.empty() && binding.column_index < column_ids.size()) {
+                // Map binding.column_index to actual column ID
+                idx_t actual_col_id = column_ids[binding.column_index];
+                
+                if (actual_col_id < column_names.size()) {
+                    std::cout << ", Column: " << column_names[actual_col_id] 
+                              << ", binding.column_index=" << binding.column_index 
+                              << " maps to actual column_id=" << actual_col_id;
+                }
+            } 
+            // Fall back to direct binding if not a LogicalGet mapping
+            else if (binding.column_index < column_names.size()) {
+                std::cout << ", Column: " << column_names[binding.column_index] 
+                          << " (direct binding)";
+            }
+            std::cout << ")";
+        } else {
+            // This might be a derived table (projection, aggregation, etc.)
+            std::cout << " (Derived column)";
+        }
+        
+        std::cout << std::endl;
+    }
+    std::cout << "=================================================================" << std::endl;
+    
+    // Print children recursively
+    for (size_t i = 0; i < op->children.size(); i++) {
+        std::cout << prefix << "Child " << i << ":" << std::endl;
+        PrintOperatorBindings(op->children[i].get(), prefix + "  ");
+    }
 }
 
 } // namespace duckdb

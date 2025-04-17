@@ -1,6 +1,6 @@
 // Exclusive
 // #define BloomJoin
-#define PredicateTransfer
+// #define PredicateTransfer
 // #define UseHashFilter
 
 // Exclusive
@@ -13,7 +13,8 @@
 // #define External
 
 // Used for change the second phase order of Yannakakis algorithm
-#define YANPLUS
+// #define YANPLUS
+#define YANPLUSAGG
 
 // Used for join order debug
 // #define PLAN_DEBUG
