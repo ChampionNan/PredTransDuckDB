@@ -192,7 +192,7 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		unused.VisitOperator(*plan);
 	});
 
-	std::cout << "After RemoveUnusedColumns! Binding" << std::endl;
+std::cout << "After RemoveUnusedColumns! Binding" << std::endl;
 	plan->Print();
 	PrintOperatorBindings(plan.get());
 
