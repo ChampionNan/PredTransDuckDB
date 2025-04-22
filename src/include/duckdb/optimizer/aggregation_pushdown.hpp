@@ -24,6 +24,8 @@ public:
 
     unique_ptr<LogicalOperator> Rewrite(unique_ptr<LogicalOperator> op);
 
+    unique_ptr<LogicalOperator> UpdateBinding(unique_ptr<LogicalOperator> op);
+
     unique_ptr<LogicalOperator> ReplaceRootCountWithSum(unique_ptr<LogicalOperator> op_node);
 
     ColumnBinding GetUpdatedBinding(const ColumnBinding& original);
@@ -42,7 +44,9 @@ public:
 
     unique_ptr<LogicalOperator> PruneAggregationColumns(unique_ptr<LogicalOperator> op);
 
-    void PruneAggregationWithProjectionMap(LogicalOperator* op, const vector<idx_t>& projection_map);
+    unique_ptr<LogicalOperator> UpdateAnnotMul(unique_ptr<LogicalOperator> op_node);
+
+    void PruneAggregationWithProjectionMap(LogicalOperator* op);
 
 private:
     Binder &binder;

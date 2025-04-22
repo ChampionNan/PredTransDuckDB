@@ -192,10 +192,6 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		unused.VisitOperator(*plan);
 	});
 
-std::cout << "After RemoveUnusedColumns! Binding" << std::endl;
-	plan->Print();
-	PrintOperatorBindings(plan.get());
-
 	RunOptimizer(OptimizerType::IN_CLAUSE, [&]() {
 		InClauseRewriter ic_rewriter(context, *this);
 		plan = ic_rewriter.Rewrite(std::move(plan));
@@ -226,9 +222,6 @@ std::cout << "After RemoveUnusedColumns! Binding" << std::endl;
 		ColumnLifetimeAnalyzer column_lifetime(true);
 		column_lifetime.VisitOperator(*plan);
 	});
-	std::cout << "After ColumnLifetimeAnalyzer1! Binding" << std::endl;
-	plan->Print();
-	PrintOperatorBindings(plan.get());
 
 	// remove duplicate aggregates
 	RunOptimizer(OptimizerType::COMMON_AGGREGATE, [&]() {
@@ -241,10 +234,6 @@ std::cout << "After RemoveUnusedColumns! Binding" << std::endl;
 		ColumnLifetimeAnalyzer column_lifetime(true);
 		column_lifetime.VisitOperator(*plan);
 	});
-
-	std::cout << "After ColumnLifetimeAnalyzer2! Binding" << std::endl;
-	plan->Print();
-	PrintOperatorBindings(plan.get());
 
 	// compress data based on statistics for materializing operators
 	RunOptimizer(OptimizerType::COMPRESSED_MATERIALIZATION, [&]() {
@@ -276,7 +265,7 @@ std::cout << "After RemoveUnusedColumns! Binding" << std::endl;
 	PrintOperatorBindings(plan.get());
 	RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
 		AggregationPushdown aggregation_pushdown(binder, context);
-		plan = aggregation_pushdown.PruneAggregationColumns(std::move(plan));
+		plan = aggregation_pushdown.UpdateBinding(std::move(plan));
 	});
 #endif
 
@@ -315,8 +304,98 @@ void Optimizer::PrintOperatorBindings(LogicalOperator* op, const string& prefix)
     // Print operator type
     std::cout << prefix << "Operator: " << LogicalOperatorToString(op->type) << std::endl;
     
+    // Print detailed information for specific operator types
+    if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+        auto& proj = op->Cast<LogicalProjection>();
+        std::cout << prefix << "Projection Expressions: " << std::endl;
+        for (idx_t i = 0; i < proj.expressions.size(); i++) {
+            auto& expr = proj.expressions[i];
+            std::cout << prefix << "  [" << i << "] " << expr->ToString() << " (type: " << expr->return_type.ToString() << ")";
+            if (expr->GetName() == "annot") {
+                std::cout << " [ANNOT COLUMN]";
+            }
+            std::cout << std::endl;
+            
+            // Print more details for function expressions
+            if (expr->type == ExpressionType::BOUND_FUNCTION) {
+                auto& func_expr = expr->Cast<BoundFunctionExpression>();
+                std::cout << prefix << "    Function: " << func_expr.function.name << std::endl;
+                std::cout << prefix << "    Children: " << func_expr.children.size() << std::endl;
+                
+                for (idx_t j = 0; j < func_expr.children.size(); j++) {
+                    auto& child = func_expr.children[j];
+                    std::cout << prefix << "      [" << j << "] " << child->ToString();
+                    
+                    if (child->type == ExpressionType::BOUND_COLUMN_REF) {
+                        auto& col_ref = child->Cast<BoundColumnRefExpression>();
+                        std::cout << " (binding: " << col_ref.binding.table_index 
+                                  << "." << col_ref.binding.column_index << ")";
+                    }
+                    std::cout << std::endl;
+				}
+        	} else if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+				auto& col_ref = expr->Cast<BoundColumnRefExpression>();
+				std::cout << " (binding: " << col_ref.binding.table_index 
+					  << "." << col_ref.binding.column_index << ")";
+			} else if (expr->type == ExpressionType::CAST) {
+				auto& cast_expr = expr->Cast<BoundCastExpression>();
+				std::cout << " (cast type: " << cast_expr.return_type.ToString() << ")";
+			}
+			std::cout << std::endl;
+        	std::cout << prefix << "Projection Table Index: " << proj.table_index << std::endl;
+		}
+    }
+    else if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+        auto& agg = op->Cast<LogicalAggregate>();
+        
+        std::cout << prefix << "Group Index: " << agg.group_index << std::endl;
+        std::cout << prefix << "Aggregate Index: " << agg.aggregate_index << std::endl;
+        
+        // Print group expressions
+        std::cout << prefix << "Group Expressions: " << std::endl;
+        for (idx_t i = 0; i < agg.groups.size(); i++) {
+            auto& expr = agg.groups[i];
+            std::cout << prefix << "  [" << i << "] " << expr->ToString() << " (type: " << expr->return_type.ToString() << ")";
+            
+            if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+                auto& col_ref = expr->Cast<BoundColumnRefExpression>();
+                std::cout << " (binding: " << col_ref.binding.table_index 
+                          << "." << col_ref.binding.column_index << ")";
+            }
+            std::cout << std::endl;
+        }
+        
+        // Print aggregate expressions
+        std::cout << prefix << "Aggregate Expressions: " << std::endl;
+        for (idx_t i = 0; i < agg.expressions.size(); i++) {
+            auto& expr = agg.expressions[i];
+            std::cout << prefix << "  [" << i << "] " << expr->ToString() << " (type: " << expr->return_type.ToString() << ")";
+            if (expr->GetName() == "annot") {
+                std::cout << " [ANNOT COLUMN]";
+            }
+            std::cout << std::endl;
+            
+            if (expr->type == ExpressionType::BOUND_AGGREGATE) {
+                auto& agg_expr = expr->Cast<BoundAggregateExpression>();
+                std::cout << prefix << "    Aggregate Function: " << agg_expr.function.name << std::endl;
+                std::cout << prefix << "    Children: " << agg_expr.children.size() << std::endl;
+                
+                for (idx_t j = 0; j < agg_expr.children.size(); j++) {
+                    auto& child = agg_expr.children[j];
+                    std::cout << prefix << "      [" << j << "] " << child->ToString();
+                    
+                    if (child->type == ExpressionType::BOUND_COLUMN_REF) {
+                        auto& col_ref = child->Cast<BoundColumnRefExpression>();
+                        std::cout << " (binding: " << col_ref.binding.table_index 
+                                  << "." << col_ref.binding.column_index << ")";
+                    }
+                    std::cout << std::endl;
+                }
+            }
+        }
+    }
     // If this is a join, print join conditions
-    if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+    else if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
         auto& join = op->Cast<LogicalComparisonJoin>();
         // Print left projection map
         std::cout << prefix << "Left Projection Map: ";
@@ -364,6 +443,7 @@ void Optimizer::PrintOperatorBindings(LogicalOperator* op, const string& prefix)
             std::cout << prefix << "    Comparison: " << EnumUtil::ToChars(condition.comparison) << std::endl;
         }
     }
+    
     // Print column bindings with table info
     auto bindings = op->GetColumnBindings();
     std::cout << prefix << "Column Bindings: " << std::endl;
