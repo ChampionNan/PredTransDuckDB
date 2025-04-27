@@ -15,11 +15,10 @@
 #include "duckdb/function/aggregate/distributive_functions.hpp"
 #include "duckdb/core_functions/aggregate/sum_helpers.hpp"
 #include "duckdb/function/function_binder.hpp"
+#include "duckdb/parser/constraints/unique_constraint.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
-
-/**
- * Process a logical plan with DFS to add annot attributes where appropriate
- */
+// Self-defined functions & declarations
 namespace duckdb {
 // Add this helper function in your AggregationPushdown class or at namespace level
 template <class OP>
@@ -167,12 +166,69 @@ unique_ptr<LogicalOperator> AggregationPushdown::ReplaceRootCountWithSum(unique_
     }
 }
 
+bool AggregationPushdown::CheckPKFK(LogicalOperator* op) {
+    // Check if operator is LogicalGet
+    if (op->type != LogicalOperatorType::LOGICAL_GET) {
+        return false; // Not a direct table, can't determine PK status
+    }
+
+    // Get all column bindings for this operator
+    auto bindings = op->GetColumnBindings();
+    
+    auto& get_op = op->Cast<LogicalGet>();
+    auto table_entry = get_op.GetTable();
+    if (!table_entry) {
+        return false; // Not a regular table
+    }
+    
+    auto &constraints = table_entry->GetConstraints();
+    
+    // For each column binding from this operator
+    for (idx_t i = 0; i < bindings.size(); i++) {
+        // Map the binding column index to the actual column index in the table
+        idx_t col_idx = bindings[i].column_index;
+        if (col_idx >= get_op.column_ids.size()) {
+            continue;
+        }
+        
+        idx_t actual_col_idx = get_op.column_ids[col_idx];
+        
+        // Check constraints for any uniqueness guarantee
+        for (auto& constraint : constraints) {
+            if (constraint->type == ConstraintType::UNIQUE) {
+                auto& unique_constraint = constraint->Cast<UniqueConstraint>();
+                
+                // For single-column unique constraint (primary key or unique)
+                if (unique_constraint.index.index != DConstants::INVALID_INDEX) {
+                    if (unique_constraint.index.index == actual_col_idx) {
+                        std::cout << "Found unique constraint on column: " << get_op.names[col_idx] << std::endl;
+                        return true;
+                    }
+                }
+                // For multi-column unique constraint (primary key or unique)
+                else if (!unique_constraint.columns.empty()) {
+                    // Get column name from physical index
+                    string column_name = get_op.names[actual_col_idx];
+                    
+                    // Check if column name is in the unique constraint
+                    for (auto& constraint_col : unique_constraint.columns) {
+                        if (constraint_col == column_name) {
+                            std::cout << "Found column in multi-column unique constraint: " << column_name << std::endl;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    return false; // No unique key found
+}
+
 unique_ptr<LogicalOperator> AggregationPushdown::AddAnnotAttributeDFS(unique_ptr<LogicalOperator> op_node) {
     if (!op_node) {
         return op_node;
     }
-    std::cout << "At AddAnnotAttributeDFS! " << std::endl;
-    std::cout << op_node->ToString();
     // Special handling for join operators
     if (op_node->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
         op_node->type == LogicalOperatorType::LOGICAL_ASOF_JOIN ||
@@ -183,15 +239,31 @@ unique_ptr<LogicalOperator> AggregationPushdown::AddAnnotAttributeDFS(unique_ptr
         // First recursively process children (but don't modify them yet)
         join.children[0] = AddAnnotAttributeDFS(std::move(join.children[0]));
         join.children[1] = AddAnnotAttributeDFS(std::move(join.children[1]));
-        
-        // Then apply CreateDynamicAggregate to children if needed
-        // 2. THEN, apply transformations to children if needed
-        // UNCOMMENT THESE CRITICAL LINES - they ensure consistent application of aggregates
-        join.children[0] = CreateDynamicAggregate(std::move(join.children[0]));
-        join.children[1] = CreateDynamicAggregate(std::move(join.children[1]));
 
+        bool addLeft = true;
+        bool addRight = true;
+        
+        // Check if any column from left child is a unique key
+        if (CheckPKFK(join.children[0].get())) {
+            addLeft = false;
+            std::cout << "Left child has unique key, skipping annot" << std::endl;
+        }
+        
+        // Check if any column from right child is a unique key
+        if (CheckPKFK(join.children[1].get())) {
+            addRight = false;
+            std::cout << "Right child has unique key, skipping annot" << std::endl;
+        }
+
+        if (addLeft) {
+            join.children[0] = CreateDynamicAggregate(std::move(join.children[0]));
+        }
+        if (addRight) {
+            join.children[1] = CreateDynamicAggregate(std::move(join.children[1]));
+        }
         // Update join conditions to use new bindings
         UpdateJoinConditions(join);
+        op_node->ResolveOperatorTypes();
         
         // 3. FINALLY, after children are properly transformed, handle this operator
         bool left_has_annot, right_has_annot;
@@ -322,17 +394,24 @@ unique_ptr<LogicalOperator> AggregationPushdown::AddAnnotAttributeDFS(unique_ptr
                 std::move(bind_data),      // Pass the bind data
                 true                       // Is operator
             );*/
-
-            op_node->ResolveOperatorTypes();
             vector<ColumnBinding> bindings_to_exclude = {left_annot, right_annot};
             auto projection = AddProjectionWithAnnot(std::move(op_node), std::move(mult_expr), "annot", bindings_to_exclude);
             return projection;
-        } 
-        else {
-            // Case 2 & 3: Only right has annot -> pass through
-            // Similar to left case, for right projection map
-            throw std::runtime_error("Not implemented");
-            return op_node;
+        } else if (left_has_annot) {
+            // Case 2: Only left child has annot
+            auto left_ref = make_uniq<BoundColumnRefExpression>(left_type, left_annot);
+            auto projection = AddProjectionWithAnnot(std::move(op_node), std::move(left_ref), "annot", {left_annot});
+            return projection;
+        } else if (right_has_annot) {
+            // Case 3: Only right child has annot
+            auto right_ref = make_uniq<BoundColumnRefExpression>(right_type, right_annot);
+            auto projection = AddProjectionWithAnnot(std::move(op_node), std::move(right_ref), "annot", {right_annot});
+            return projection;
+        } else {
+            // Case 4: Neither child has an annotation column
+            // Create a projection without adding an annotation column
+            auto projection = AddProjectionWithAnnot(std::move(op_node), nullptr, "", {});
+            return projection;
         }
     } else {
         // Process each child
@@ -373,19 +452,13 @@ bool AggregationPushdown::FindAnnotAttribute(LogicalOperator* op, ColumnBinding&
             }
         }
     }
-    
-    // Use position heuristics if needed
-    // [position-based detection logic would go here]
-    
+
     return false;
 }
 
-// Helper to add a projection with annot expression
+// Helper to add a projection with annot expression, both annot1 * annot2 and annot
 unique_ptr<LogicalOperator> AggregationPushdown::AddProjectionWithAnnot(unique_ptr<LogicalOperator> op, unique_ptr<Expression> annot_expr, string name, vector<ColumnBinding> bindings_to_exclude) {
     // Get bindings from operator
-    std::cout << "At AddProjectionWithAnnot! " << std::endl;
-    std::cout << op->ToString();
-
     auto bindings = op->GetColumnBindings();
     
     // Create expressions for projection
@@ -419,8 +492,10 @@ unique_ptr<LogicalOperator> AggregationPushdown::AddProjectionWithAnnot(unique_p
     }
     
     // Then add the annot expression
-    annot_expr->alias = name;
-    projection_expressions.push_back(std::move(annot_expr));
+    if (annot_expr) {
+        annot_expr->alias = name;
+        projection_expressions.push_back(std::move(annot_expr));
+    }
     
     auto projection = make_uniq<LogicalProjection>(projection_index, std::move(projection_expressions));
     
@@ -437,9 +512,6 @@ unique_ptr<LogicalOperator> AggregationPushdown::AddProjectionWithAnnot(unique_p
 
 unique_ptr<LogicalOperator> AggregationPushdown::CreateDynamicAggregate(unique_ptr<LogicalOperator> child_node) {
     // Extract child column information before we modify it
-    std::cout << "At CreateDynamicAggregate! " << std::endl;
-    std::cout << child_node->ToString();
-
     vector<ColumnBinding> child_bindings = child_node->GetColumnBindings();
     child_node->ResolveOperatorTypes();
     vector<LogicalType> child_types = child_node->types;
@@ -810,6 +882,9 @@ unique_ptr<LogicalOperator> AggregationPushdown::UpdateAnnotMul(unique_ptr<Logic
                         }
                         
                         std::cout << "Updated multiplication expression bindings for annot" << std::endl;
+                    } else {
+                        // FIXME: 
+                        throw std::runtime_error("Annot attribute not found in join children");
                     }
                 }
             }

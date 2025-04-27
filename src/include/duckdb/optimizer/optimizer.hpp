@@ -18,6 +18,15 @@
 namespace duckdb {
 class Binder;
 
+// Add this to the AggregationPushdown class in aggregation_pushdown.hpp
+enum class QueryType {
+    SELECT_STAR,         // SELECT * FROM 
+    SELECT_DISTINCT,      // SELECT DISTINCT a FROM 
+    COUNT_STAR,         // SELECT COUNT(*) FROM (no GROUP BY)
+    MINMAX_AGGREGATE,   // SELECT MIN(a), MAX(b) FROM (no GROUP BY)
+    OTHER               // Any other query pattern
+};
+
 class Optimizer {
 public:
 	Optimizer(Binder &binder, ClientContext &context);
@@ -27,6 +36,7 @@ public:
 	//! Return a reference to the client context of this optimizer
 	ClientContext &GetContext();
 
+	QueryType DetectQueryType(LogicalOperator* op);
 	void PrintOperatorBindings(LogicalOperator* op, const string& prefix = "");
 
 	ClientContext &context;

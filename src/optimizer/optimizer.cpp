@@ -129,40 +129,32 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		plan = optimizer.Optimize(std::move(plan));
 		std::cout << "After First Join Order Plan " << std::endl;
 		plan->Print();
-#ifdef PLAN_DEBUG
-		std::cout << "GetQueryGraphEdges1: " << std::endl;
-		std::cout << optimizer.GetQueryGraphEdges().ToString() << std::endl;
-#endif // PLAN_DEBUG
-		
 	});
 
-	// then we start the first phase of predicate transfer optimization,
-	// building the transfer graph
-#ifdef PredicateTransfer
-	PredicateTransferOptimizer PT(context);
-	plan = PT.PreOptimize(std::move(plan));
-#endif
-
+	// NOTE: Add query type detection here
 #ifdef YANPLUS
-	auto BFOrder = PT.GetBFOrder();
-	std::cout << "BFOrder Size: " << BFOrder.size() << std::endl;
-	for (auto &node : BFOrder) {
-		std::cout << "BFOrder Node: " << node->ParamsToString() << std::endl;
-	}
+	auto query_type = DetectQueryType(plan.get());
+	std::cout << "Query Type: " << static_cast<int>(query_type) << std::endl;
 
-	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
-		JoinOrderOptimizer optimizer2(context);
-		plan = optimizer2.CallSolveJoinOrderFixed(std::move(plan), BFOrder);
-		std::cout << "After Second Join Order Plan Begin " << std::endl;
+	if (query_type == QueryType::SELECT_STAR) {
+		PredicateTransferOptimizer PT(context);
+		plan = PT.PreOptimize(std::move(plan));
+		auto BFOrder = PT.GetBFOrder();
+		/*std::cout << "BFOrder Size: " << BFOrder.size() << std::endl;
+		for (auto &node : BFOrder) {
+			std::cout << "BFOrder Node: " << node->ParamsToString() << std::endl;
+		}*/
+		RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
+			JoinOrderOptimizer optimizer2(context);
+			plan = optimizer2.CallSolveJoinOrderFixed(std::move(plan), BFOrder);
+			std::cout << "After Second Join Order Plan Begin " << std::endl;
+			plan->Print();
+		});
+		plan = PT.Optimize(std::move(plan));
+		std::cout << "After PT Plan " << std::endl;
 		plan->Print();
-	});
-#endif
-
-#ifdef PredicateTransfer
-	plan = PT.Optimize(std::move(plan));
-	std::cout << "After PT Plan " << std::endl;
-	plan->Print();
-	PT.PrintUseBFAndRelatedCreate(plan);
+		PT.PrintUseBFAndRelatedCreate(plan);
+	}
 #endif
 
 	// rewrites UNNESTs in DelimJoins by moving them to the projection
@@ -171,19 +163,20 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		plan = unnest_rewriter.Optimize(std::move(plan));
 	});
 
-#ifdef YANPLUSAGG
-	std::cout << "Before AGGREGATION_PUSHDOWN Plan " << std::endl;
-	plan->Print();
-	std::cout << "Before AGGREGATION_PUSHDOWN Plan, Print binding" << std::endl;
-	PrintOperatorBindings(plan.get());
+#ifdef YANPLUS
+	if (query_type == QueryType::COUNT_STAR) {
+		std::cout << "Before AGGREGATION_PUSHDOWN Plan " << std::endl;
+		plan->Print();
+		PrintOperatorBindings(plan.get());
 
-	RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
-		AggregationPushdown aggregation_pushdown(binder, context);
-		plan = aggregation_pushdown.Rewrite(std::move(plan));
-	});
-	std::cout << "After AddAnnotAttributeDFS! Binding" << std::endl;
-	plan->Print();
-	PrintOperatorBindings(plan.get());
+		RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
+			AggregationPushdown aggregation_pushdown(binder, context);
+			plan = aggregation_pushdown.Rewrite(std::move(plan));
+		});
+		std::cout << "After AddAnnotAttributeDFS! Binding" << std::endl;
+		plan->Print();
+		PrintOperatorBindings(plan.get());
+	}
 #endif
 
 	// removes unused columns
@@ -259,14 +252,16 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		});
 	}
 
-#ifdef YANPLUSAGG
-	std::cout << "Before AGGREGATION_PUSHDOWN Join projection prune " << std::endl;
-	plan->Print();
-	PrintOperatorBindings(plan.get());
-	RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
-		AggregationPushdown aggregation_pushdown(binder, context);
-		plan = aggregation_pushdown.UpdateBinding(std::move(plan));
-	});
+#ifdef YANPLUS
+	if (query_type == QueryType::COUNT_STAR) {
+		std::cout << "Before AGGREGATION_PUSHDOWN Join projection prune " << std::endl;
+		plan->Print();
+		PrintOperatorBindings(plan.get());
+		RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
+			AggregationPushdown aggregation_pushdown(binder, context);
+			plan = aggregation_pushdown.UpdateBinding(std::move(plan));
+		});
+	}
 #endif
 
 	std::cout << "After All Optimizations Plan " << std::endl;
@@ -280,6 +275,93 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 
 	return std::move(plan);
 }
+
+
+QueryType Optimizer::DetectQueryType(LogicalOperator* op) {
+    if (!op) {
+        return QueryType::OTHER;
+    }
+    
+    // Case 2: SELECT COUNT(*) FROM table
+    // Usually implemented as a projection over an aggregate
+    if (op->type == LogicalOperatorType::LOGICAL_PROJECTION && 
+        op->children.size() == 1 && 
+        op->children[0]->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+        
+        auto& agg = op->children[0]->Cast<LogicalAggregate>();
+        
+        // Check if this is a COUNT(*) aggregation (no GROUP BY, single expression)
+        if (agg.groups.empty() && agg.expressions.size() == 1) {
+            auto& expr = agg.expressions[0];
+            
+            // Verify it's a COUNT(*) expression
+            if (expr->GetExpressionClass() == ExpressionClass::BOUND_AGGREGATE) {
+                auto& bound_agg = expr->Cast<BoundAggregateExpression>();
+                
+                // Check if this is COUNT(*) or COUNT_STAR
+                if (bound_agg.function.name == "count_star" || 
+                    (bound_agg.function.name == "count" && bound_agg.children.empty())) {
+                    return QueryType::COUNT_STAR;
+                }
+            }
+        }
+    }
+    
+    // Case 3: SELECT MIN(a), MAX(b) FROM table
+    // Also projection over aggregate, but with MIN/MAX functions
+    if (op->type == LogicalOperatorType::LOGICAL_PROJECTION && 
+        op->children.size() == 1 && 
+        op->children[0]->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+        
+        auto& agg = op->children[0]->Cast<LogicalAggregate>();
+        
+        // Check if this has no GROUP BY
+        if (agg.groups.empty() && !agg.expressions.empty()) {
+            bool is_minmax_aggregate = true;
+            
+            // Check all aggregate expressions
+            for (auto& expr : agg.expressions) {
+                if (expr->GetExpressionClass() == ExpressionClass::BOUND_AGGREGATE) {
+                    auto& bound_agg = expr->Cast<BoundAggregateExpression>();
+                    
+                    // Only MIN, MAX allowed for simple aggregate type
+                    if (bound_agg.function.name != "min" && 
+                        bound_agg.function.name != "max") {
+                        is_minmax_aggregate = false;
+                        break;
+                    }
+                } else {
+                    is_minmax_aggregate = false;
+                    break;
+                }
+            }
+            
+            if (is_minmax_aggregate) {
+                return QueryType::MINMAX_AGGREGATE;
+            }
+        }
+    }
+
+	// Case 4: SELECT distinct a FROM 
+    // Usually implemented as a projection over a scan/get
+    if (op->type == LogicalOperatorType::LOGICAL_DISTINCT && 
+        op->children.size() == 1 && 
+        op->children[0]->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+        return QueryType::SELECT_DISTINCT;
+    }
+
+	// Case 1: SELECT * FROM, full query
+    // Usually implemented as a projection over a scan/get
+    if (op->type == LogicalOperatorType::LOGICAL_PROJECTION && 
+        op->children.size() == 1 && 
+        op->children[0]->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY){ 
+        return QueryType::SELECT_STAR;
+    }
+    
+    // Any other query pattern
+    return QueryType::OTHER;
+}
+
 
 void Optimizer::PrintOperatorBindings(LogicalOperator* op, const string& prefix) {
     if (!op) return;

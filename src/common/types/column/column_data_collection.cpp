@@ -774,6 +774,7 @@ static bool IsComplexType(const LogicalType &type) {
 void ColumnDataCollection::Append(ColumnDataAppendState &state, DataChunk &input) {
 	D_ASSERT(!finished_append);
 
+	/*
 	std::cout << "Print types" << std::endl;
 	for (auto &type : types) {
 		std::cout << type.ToString() << std::endl;
@@ -781,7 +782,7 @@ void ColumnDataCollection::Append(ColumnDataAppendState &state, DataChunk &input
 	std::cout << "Print input types" << std::endl;
 	for (auto &type : input.GetTypes()) {
 		std::cout << type.ToString() << std::endl;
-	}
+	}*/
 	// D_ASSERT(types == input.GetTypes());
 
 	auto &segment = *segments.back();

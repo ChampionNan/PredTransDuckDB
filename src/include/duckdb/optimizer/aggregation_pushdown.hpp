@@ -16,6 +16,7 @@ namespace duckdb {
 class Optimizer;
 class Binder;
 
+
 class AggregationPushdown {
 public:
     explicit AggregationPushdown(Binder &binder, ClientContext &context) : binder(binder), context(context) {
@@ -43,6 +44,8 @@ public:
     string GetColumnName(LogicalOperator* op, idx_t idx);
 
     unique_ptr<LogicalOperator> PruneAggregationColumns(unique_ptr<LogicalOperator> op);
+
+    bool CheckPKFK(LogicalOperator* op);
 
     unique_ptr<LogicalOperator> UpdateAnnotMul(unique_ptr<LogicalOperator> op_node);
 
