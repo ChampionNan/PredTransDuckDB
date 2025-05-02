@@ -17,52 +17,95 @@
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
 
-// Self-defined functions & declarations
+
 namespace duckdb {
-// Add this helper function in your AggregationPushdown class or at namespace level
-template <class OP>
-static scalar_function_t GetMultiplyFunction(PhysicalType type) {
-    scalar_function_t function;
-    switch (type) {
-        case PhysicalType::INT32:
-            function = &ScalarFunction::BinaryFunction<int32_t, int32_t, int32_t, OP>;
-            break;
-        case PhysicalType::INT64:
-            function = &ScalarFunction::BinaryFunction<int64_t, int64_t, int64_t, OP>;
-            break;
-        case PhysicalType::INT128:  // Add this case for HUGEINT
-            function = &ScalarFunction::BinaryFunction<__int128_t, __int128_t, __int128_t, OP>;
-            break;
-        case PhysicalType::FLOAT:
-            function = &ScalarFunction::BinaryFunction<float, float, float, OP>;
-            break;
-        case PhysicalType::DOUBLE:
-            function = &ScalarFunction::BinaryFunction<double, double, double, OP>;
-            break;
-        default:
-            // Default to hugeint
-            function = &ScalarFunction::BinaryFunction<hugeint_t, hugeint_t, hugeint_t, OP>;
-            break;
+// Aggregation Function Support for SUM
+AggregateFunction GetSumAggregate(PhysicalType type);
+
+// Aggregation Function Support for MIN
+AggregateFunction GetMinAggregate(ClientContext &context, const LogicalType &input_type) {
+    vector<LogicalType> argument_types = {input_type};
+    auto &catalog = Catalog::GetSystemCatalog(context);
+    auto entry = catalog.GetEntry(context, CatalogType::AGGREGATE_FUNCTION_ENTRY, DEFAULT_SCHEMA, "min", OnEntryNotFound::RETURN_NULL);
+    if (!entry) {
+        // Fall back to a basic one if not found
+        AggregateFunction min_func("min", argument_types, input_type, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+        return min_func;
     }
-    return function;
+    auto &func_catalog_entry = entry->Cast<AggregateFunctionCatalogEntry>();
+    return func_catalog_entry.functions.GetFunctionByArguments(context, argument_types);
 }
 
-AggregateFunction GetSumAggregate(PhysicalType type);
-unique_ptr<FunctionData> BindDecimalMultiply(ClientContext &context, ScalarFunction &bound_function,
-    vector<unique_ptr<Expression>> &arguments);
+// Aggregation Function Support for MAX
+AggregateFunction GetMaxAggregate(ClientContext &context, const LogicalType &input_type) {
+    vector<LogicalType> argument_types = {input_type};
+    auto &catalog = Catalog::GetSystemCatalog(context);
+    auto entry = catalog.GetEntry(context, CatalogType::AGGREGATE_FUNCTION_ENTRY, DEFAULT_SCHEMA, "max", OnEntryNotFound::RETURN_NULL);
+    if (!entry) {
+        // Fall back to a basic one if not found
+        AggregateFunction max_func("max", argument_types, input_type, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+        return max_func;
+    }
+    auto &func_catalog_entry = entry->Cast<AggregateFunctionCatalogEntry>();
+    return func_catalog_entry.functions.GetFunctionByArguments(context, argument_types);
+}
 
+
+// Part1
 unique_ptr<LogicalOperator> AggregationPushdown::Rewrite(unique_ptr<LogicalOperator> op) {
     global_binding_map.clear();
+    if (query_type == QueryType::MINMAX_AGGREGATE) {
+        // Store the min/max aggregates
+        StoreMinMaxAggregates(op->children[0].get());
+    }
     op = AddAnnotAttributeDFS(std::move(op));
     op = ReplaceRootCountWithSum(std::move(op));
     return op;
 }
 
+// Part2
 unique_ptr<LogicalOperator> AggregationPushdown::UpdateBinding(unique_ptr<LogicalOperator> op) {
     op = PruneAggregationColumns(std::move(op));
     op = UpdateAnnotMul(std::move(op));
     return op;
+}
+
+void AggregationPushdown::StoreMinMaxAggregates(LogicalOperator* op) {
+    auto& agg = op->Cast<LogicalAggregate>();
+    for (idx_t i = 0; i < agg.expressions.size(); i++) {
+        auto& expr = agg.expressions[i];
+        
+        if (expr->GetExpressionClass() == ExpressionClass::BOUND_AGGREGATE) {
+            auto& bound_agg = expr->Cast<BoundAggregateExpression>();
+            
+            // Check if it's a MIN or MAX function
+            if (bound_agg.function.name == "min" || bound_agg.function.name == "max") {
+                // Create a new info entry
+                MinMaxColumnInfo info;
+                
+                if (bound_agg.children.size() > 0 && 
+                    bound_agg.children[0]->type == ExpressionType::BOUND_COLUMN_REF) {
+                    // Extract the actual column binding from the expression
+                    auto& col_ref = bound_agg.children[0]->Cast<BoundColumnRefExpression>();
+                    info.original_binding = col_ref.binding;
+                    info.binding = col_ref.binding;
+                } else {
+                    throw std::runtime_error("Complex MIN/MAX aggregate expression case");
+                }
+                
+                // Store the function name
+                info.function_name = bound_agg.function.name;
+                
+                // Add to our tracking vector
+                minmax_columns.push_back(info);
+                
+                std::cout << "Stored MIN/MAX aggregate: " << info.ToString() << std::endl;
+            }
+        }
+    }
 }
 
 unique_ptr<LogicalOperator> AggregationPushdown::ReplaceRootCountWithSum(unique_ptr<LogicalOperator> op_node) {
@@ -70,96 +113,140 @@ unique_ptr<LogicalOperator> AggregationPushdown::ReplaceRootCountWithSum(unique_
         return op_node;
     }
 
-    // FIXME: DEBUG ADDING
-    // return std::move(op_node->children[0]);
-
-    std::cout << "At ReplaceRootCountWithSum! " << std::endl;
-    
     // Check if this is the root aggregate with COUNT(*)
-    if (op_node->type == LogicalOperatorType::LOGICAL_PROJECTION && 
-        op_node->children.size() == 1 && 
-        op_node->children[0]->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-        
+    if (query_type == QueryType::COUNT_STAR) {
         auto &agg = op_node->children[0]->Cast<LogicalAggregate>();
-        // Check if it's a simple COUNT(*) aggregation (no GROUP BY, single expression)
-        if (agg.groups.empty() && agg.expressions.size() == 1) {
-            auto &expr = agg.expressions[0];
-            
-            // Verify it's a COUNT(*) expression
-            if (expr->GetExpressionClass() == ExpressionClass::BOUND_AGGREGATE) {
-                auto &bound_agg = expr->Cast<BoundAggregateExpression>();
+        // Search for annot column in the child
+        ColumnBinding annot_binding;
+        LogicalType annot_type; // Default, adjust if needed
+        if (agg.children.size() > 0 && 
+            FindAnnotAttribute(agg.children[0].get(), annot_binding, annot_type)) {
                 
-                // Check if this is COUNT(*) or COUNT_STAR
-                if (bound_agg.function.name == "count_star" || 
-                    (bound_agg.function.name == "count" && bound_agg.children.empty())) {
-                    
-                    // Search for annot column in the child
-                    ColumnBinding annot_binding;
-                    LogicalType annot_type; // Default, adjust if needed
-                    if (agg.children.size() > 0 && 
-                        FindAnnotAttribute(agg.children[0].get(), annot_binding, annot_type)) {
-                        
-                        // Found annot - replace COUNT(*) with SUM(annot)
-                        vector<unique_ptr<Expression>> sum_args;
-                        
-                        // Try to get the actual type from bindings
-                        agg.ResolveOperatorTypes();
-                        auto child_types = agg.children[0]->types;
-                        auto child_bindings = agg.children[0]->GetColumnBindings();
-                        
-                        // Create reference to annot column
-                        auto annot_col_ref = make_uniq<BoundColumnRefExpression>(
-                            // "annot",
-                            annot_type,
-                            annot_binding
-                        );
-                        
-                        sum_args.push_back(std::move(annot_col_ref));
-                        
-                        AggregateFunction sum_function = GetSumAggregate(annot_type.InternalType());
-                        if (sum_function.name.empty()) {
-                            sum_function.name = "sum";  // Explicitly set the name
-                        }        
-                        // sum_function.return_type = LogicalType::HUGEINT;                
+            // Found annot - replace COUNT(*) with SUM(annot)
+            vector<unique_ptr<Expression>> sum_args;
+                
+            // Try to get the actual type from bindings
+            agg.ResolveOperatorTypes();
+            auto child_types = agg.children[0]->types;
+            auto child_bindings = agg.children[0]->GetColumnBindings();
+                
+            // Create reference to annot column
+            auto annot_col_ref = make_uniq<BoundColumnRefExpression>(
+                // "annot",
+                annot_type,
+                annot_binding
+            );
+                
+            sum_args.push_back(std::move(annot_col_ref));
+                
+            AggregateFunction sum_function = GetSumAggregate(annot_type.InternalType());
+            if (sum_function.name.empty()) {
+                sum_function.name = "sum";  // Explicitly set the name
+            }        
+            // sum_function.return_type = LogicalType::HUGEINT;                
 
+            FunctionBinder function_binder(context);
+            auto sum_expr = function_binder.BindAggregateFunction(
+                sum_function, 
+                std::move(sum_args), 
+                nullptr, 
+                AggregateType::NON_DISTINCT
+            );
+            // Replace the expression
+            agg.expressions[0] = std::move(sum_expr);
+
+            agg.ResolveOperatorTypes();
+
+            // NOTE: Adjust projection column to annot only
+            auto &proj = op_node->Cast<LogicalProjection>();
+            vector<unique_ptr<Expression>> new_proj_exprs;
+
+            auto agg_binding = ColumnBinding(agg.aggregate_index, 0);
+            auto annot_col_ref_proj = make_uniq<BoundColumnRefExpression>(
+                agg.expressions[0]->return_type, // Get the type from the aggregate expression
+                agg_binding                      // Use aggregate's binding, not the input binding
+            );
+                
+            // Add only this expression to the projection
+            new_proj_exprs.push_back(std::move(annot_col_ref_proj));
+                
+            // Replace all projection expressions with just the annot
+            proj.expressions = std::move(new_proj_exprs);
+                
+            // Update the projection's output types to match the new expression list
+            proj.types.clear();
+            proj.types.push_back(proj.expressions[0]->return_type);
+
+            op_node->ResolveOperatorTypes();
+            return op_node;
+        }
+    } else if (query_type == QueryType::MINMAX_AGGREGATE) {
+        auto &agg = op_node->children[0]->Cast<LogicalAggregate>();
+    
+        // First, get the child bindings for reference
+        auto child_bindings = agg.children[0]->GetColumnBindings();
+        auto child_types = agg.children[0]->types;
+        vector<unique_ptr<Expression>> agg_expressions;
+
+        for (const auto& info : minmax_columns) {
+            ColumnBinding original = info.original_binding;
+            ColumnBinding new_binding = info.binding;
+
+            for (idx_t i = 0; i < child_bindings.size(); i++) {
+                if (child_bindings[i] == new_binding) {
+                    // std::cout << "Replace final root binding: " << child_bindings[i].ToString() << " -> " << new_binding.ToString() << std::endl;
+                    vector<unique_ptr<Expression>> minmax_list;
+                    auto col_ref = make_uniq<BoundColumnRefExpression>(child_types[i], child_bindings[i]);
+                    minmax_list.push_back(std::move(col_ref));
+                    if (info.function_name == "min") {
+                        auto min_func = GetMinAggregate(context, child_types[i]);
                         FunctionBinder function_binder(context);
-                        auto sum_expr = function_binder.BindAggregateFunction(
-                            sum_function, 
-                            std::move(sum_args), 
+                        auto min_expr = function_binder.BindAggregateFunction(
+                            min_func, 
+                            std::move(minmax_list), 
                             nullptr, 
                             AggregateType::NON_DISTINCT
                         );
-                        // Replace the expression
-                        agg.expressions[0] = std::move(sum_expr);
-
-                        agg.ResolveOperatorTypes();
-
-                        // NOTE: Adjust projection column to annot only
-                        auto &proj = op_node->Cast<LogicalProjection>();
-                        vector<unique_ptr<Expression>> new_proj_exprs;
-
-                        auto agg_binding = ColumnBinding(agg.aggregate_index, 0);
-                        auto annot_col_ref_proj = make_uniq<BoundColumnRefExpression>(
-                            agg.expressions[0]->return_type, // Get the type from the aggregate expression
-                            agg_binding                      // Use aggregate's binding, not the input binding
+                        agg_expressions.push_back(std::move(min_expr));
+                    } else if (info.function_name == "max") {
+                        auto max_func = GetMaxAggregate(context, child_types[i]);
+                        FunctionBinder function_binder(context);
+                        auto max_expr = function_binder.BindAggregateFunction(
+                            max_func, 
+                            std::move(minmax_list), 
+                            nullptr, 
+                            AggregateType::NON_DISTINCT
                         );
-                        
-                        // Add only this expression to the projection
-                        new_proj_exprs.push_back(std::move(annot_col_ref_proj));
-                        
-                        // Replace all projection expressions with just the annot
-                        proj.expressions = std::move(new_proj_exprs);
-                        
-                        // Update the projection's output types to match the new expression list
-                        proj.types.clear();
-                        proj.types.push_back(proj.expressions[0]->return_type);
-
-                        op_node->ResolveOperatorTypes();
-                        return op_node;
+                        agg_expressions.push_back(std::move(max_expr));
+                    } else {
+                        throw std::runtime_error("Upsupport function name: " + info.function_name);
                     }
                 }
             }
         }
+        if (!agg_expressions.empty()) {
+            agg.expressions = std::move(agg_expressions);        
+            agg.ResolveOperatorTypes();
+        }
+        auto &proj = op_node->Cast<LogicalProjection>();
+        vector<unique_ptr<Expression>> new_proj_exprs;
+        auto agg_bindings = agg.GetColumnBindings();
+        for (idx_t i = 0; i < agg_bindings.size(); i++) {
+            // Create binding from the aggregate
+            // Create a reference expression to the aggregate output
+            auto ref_expr = make_uniq<BoundColumnRefExpression>(
+                agg.expressions[i]->return_type,
+                agg_bindings[i]
+            );
+            
+            // Add to new projection expressions
+            new_proj_exprs.push_back(std::move(ref_expr));
+        }
+        // Replace the projection's expressions
+        proj.expressions = std::move(new_proj_exprs);
+        proj.ResolveOperatorTypes();
+        return op_node;
+
     }
     else {
         throw std::runtime_error("Not implemented");
@@ -229,6 +316,8 @@ unique_ptr<LogicalOperator> AggregationPushdown::AddAnnotAttributeDFS(unique_ptr
     if (!op_node) {
         return op_node;
     }
+    std::cout << "At AddAnnotAttributeDFS" << std::endl;
+    op_node->Print();
     // Special handling for join operators
     if (op_node->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
         op_node->type == LogicalOperatorType::LOGICAL_ASOF_JOIN ||
@@ -266,155 +355,91 @@ unique_ptr<LogicalOperator> AggregationPushdown::AddAnnotAttributeDFS(unique_ptr
         op_node->ResolveOperatorTypes();
         
         // 3. FINALLY, after children are properly transformed, handle this operator
-        bool left_has_annot, right_has_annot;
-        ColumnBinding left_annot, right_annot;
-        LogicalType left_type, right_type;
-        
-        left_has_annot = FindAnnotAttribute(join.children[0].get(), left_annot, left_type);
-        right_has_annot = FindAnnotAttribute(join.children[1].get(), right_annot, right_type);
-
-        // Handle the three different cases for annot propagation
-        if (left_has_annot && right_has_annot) {
-            // Case 1: Both children have annot -> create multiplication
-            vector<unique_ptr<Expression>> mult_children;
-            auto left_ref = make_uniq<BoundColumnRefExpression>(left_type, left_annot);
-            mult_children.push_back(std::move(left_ref));
-            auto right_ref = make_uniq<BoundColumnRefExpression>(right_type, right_annot);
-            mult_children.push_back(std::move(right_ref));
-
-            /*
-            LogicalType left_operand_type = left_type;
-            LogicalType right_operand_type = right_type;
-            bool needs_cast = (left_type != right_type && (left_type.id() == LogicalTypeId::HUGEINT || right_type.id() == LogicalTypeId::HUGEINT));
-            if (needs_cast) {
-                // Cast to HUGEINT
-                if (left_type.id() == LogicalTypeId::HUGEINT) {
-                    auto left_ref = make_uniq<BoundColumnRefExpression>(left_type, left_annot);
-                    mult_children.push_back(std::move(left_ref));
-        
-                    // Create right reference with CAST
-                    auto right_ref = make_uniq<BoundColumnRefExpression>(right_type, right_annot);
-                    auto cast_expr = BoundCastExpression::AddDefaultCastToType(
-                        std::move(right_ref),
-                        LogicalType(LogicalTypeId::HUGEINT)
-                    );
-                    mult_children.push_back(std::move(cast_expr));
-                    right_operand_type = LogicalType::HUGEINT;
-                } else {
-                    auto left_ref = make_uniq<BoundColumnRefExpression>(left_type, left_annot);
-                    auto cast_expr = BoundCastExpression::AddDefaultCastToType(
-                        std::move(left_ref),
-                        LogicalType(LogicalTypeId::HUGEINT)
-                    );
-                    mult_children.push_back(std::move(cast_expr));
-        
-                    // Create right reference normally
-                    auto right_ref = make_uniq<BoundColumnRefExpression>(right_type, right_annot);
-                    mult_children.push_back(std::move(right_ref));
-        
-                    // Set function argument types
-                    left_operand_type = LogicalType::HUGEINT;
-                }
-            } else {
+        if (query_type == QueryType::COUNT_STAR) {
+            bool left_has_annot, right_has_annot;
+            ColumnBinding left_annot, right_annot;
+            LogicalType left_type, right_type;
+            
+            left_has_annot = FindAnnotAttribute(join.children[0].get(), left_annot, left_type);
+            right_has_annot = FindAnnotAttribute(join.children[1].get(), right_annot, right_type);
+    
+            // Handle the three different cases for annot propagation
+            if (left_has_annot && right_has_annot) {
+                // Case 1: Both children have annot -> create multiplication
+                vector<unique_ptr<Expression>> mult_children;
                 auto left_ref = make_uniq<BoundColumnRefExpression>(left_type, left_annot);
-                auto right_ref = make_uniq<BoundColumnRefExpression>(right_type, right_annot);
-                
                 mult_children.push_back(std::move(left_ref));
+                auto right_ref = make_uniq<BoundColumnRefExpression>(right_type, right_annot);
                 mult_children.push_back(std::move(right_ref));
+    
+                FunctionBinder function_binder(context);
+                string error_msg;
+    
+                // Let DuckDB automatically select the right function and return type
+                auto bound_expr = function_binder.BindScalarFunction(
+                    DEFAULT_SCHEMA,    // Schema name
+                    "*",                // Function name
+                    std::move(mult_children),
+                    error_msg,         // Error message
+                    true               // Don't check parameter count
+                );
+                if (!bound_expr) {
+                    throw Exception("Failed to bind multiplication function: " + error_msg);
+                }
+                auto mult_expr = std::move(bound_expr);
+    
+                vector<ColumnBinding> bindings_to_exclude = {left_annot, right_annot};
+                // TODO: for minman_aggregate, we need to include all annot columns, and no exclude
+                auto projection = AddProjectionWithAnnot(std::move(op_node), std::move(mult_expr), "annot", bindings_to_exclude);
+                return projection;
+            } else if (left_has_annot) {
+                // Case 2: Only left child has annot
+                auto left_ref = make_uniq<BoundColumnRefExpression>(left_type, left_annot);
+                // TODO: For single side, we just add to output
+                auto projection = AddProjectionWithAnnot(std::move(op_node), std::move(left_ref), "annot", {left_annot});
+                return projection;
+            } else if (right_has_annot) {
+                // Case 3: Only right child has annot
+                auto right_ref = make_uniq<BoundColumnRefExpression>(right_type, right_annot);
+                auto projection = AddProjectionWithAnnot(std::move(op_node), std::move(right_ref), "annot", {right_annot});
+                return projection;
+            } else {
+                // Case 4: Neither child has an annotation column
+                auto projection = AddProjectionWithAnnot(std::move(op_node), nullptr, "", {});
+                return projection;
             }
-            std::cout << "Print type!" << std::endl;
-            std::cout << "Left type raw value: " << static_cast<int>(left_operand_type.InternalType()) << std::endl;
-            std::cout << "Right type raw value: " << static_cast<int>(right_operand_type.InternalType()) << std::endl;
-            */
-            
-            FunctionBinder function_binder(context);
-            string error_msg;
+        } else if (query_type == QueryType::MINMAX_AGGREGATE) {
+            std::cout << "AddAnnotAttributeDFS: MINMAX_AGGREGATE" << std::endl;
+            op_node->Print();
+            vector<ColumnBinding> left_annots, right_annots;
+            vector<LogicalType> left_types, right_types;
+            vector<ColumnBinding> bindings_to_exclude;
+            vector<unique_ptr<Expression>> annot_exprs;
 
-            // Let DuckDB automatically select the right function and return type
-            auto bound_expr = function_binder.BindScalarFunction(
-                DEFAULT_SCHEMA,    // Schema name
-                "*",                // Function name
-                std::move(mult_children),
-                error_msg,         // Error message
-                true               // Don't check parameter count
-            );
-            if (!bound_expr) {
-                throw Exception("Failed to bind multiplication function: " + error_msg);
+            bool left_has_annots = FindAllAnnotAttributes(join.children[0].get(), left_annots, left_types);
+            bool right_has_annots = FindAllAnnotAttributes(join.children[1].get(), right_annots, right_types);
+
+            if (left_has_annots) {
+                for (idx_t i = 0; i < left_annots.size(); i++) {
+                    auto left_ref = make_uniq<BoundColumnRefExpression>(left_types[i], left_annots[i]);
+                    annot_exprs.push_back(std::move(left_ref));
+                    bindings_to_exclude.push_back(left_annots[i]);
+                }
             }
-            auto mult_expr = std::move(bound_expr);
+            if (right_has_annots) {
+                for (idx_t i = 0; i < right_annots.size(); i++) {
+                    auto right_ref = make_uniq<BoundColumnRefExpression>(right_types[i], right_annots[i]);
+                    annot_exprs.push_back(std::move(right_ref));
+                    bindings_to_exclude.push_back(right_annots[i]);
+                }
+            }
 
-
-            // Create the function expression with the properly determined type
-            /*
-            auto mult_expr = make_uniq<BoundFunctionExpression>(
-                bound_function.return_type,  // DuckDB determined return type
-                bound_function,              // Properly bound function
-                std::move(mult_children),    // Move arguments
-                nullptr,                     // Bind info
-                true                         // Is operator
-            );*/
-            // Method1
-            /*
-            ScalarFunction multiply_func(
-                "*", 
-                {left_operand_type, right_operand_type}, 
-                LogicalType::HUGEINT, // Return type (will be determined by bind)
-                GetMultiplyFunction<MultiplyOperator>(left_operand_type.InternalType())
-            );
-
-            // Create the function expression
-            auto mult_expr = make_uniq<BoundFunctionExpression>(
-                LogicalType::HUGEINT,          // Return type
-                multiply_func,       // Function
-                std::move(mult_children),  // Arguments
-                nullptr,             // Bind info
-                true                 // Is operator
-            );*/
-            // Add projection with multiplication
-            
-            /*
-            // Create the ScalarFunction with explicit BindDecimalMultiply
-            ScalarFunction multiply_func(
-                "*",                       // Function name
-                arg_types,                 // Argument types
-                LogicalType::HUGEINT,      // Return type (will be determined by bind)
-                nullptr,                   // Function pointer (will be set by bind)
-                BindDecimalMultiply        // Explicitly use BindDecimalMultiply
-            );
-
-            auto bind_data = BindDecimalMultiply(context, multiply_func, mult_children);
-
-            std::cout << "Multiplication return type: " << multiply_func.return_type.ToString() << std::endl;
-
-            // Create the function expression with the determined return type
-            auto mult_expr = make_uniq<BoundFunctionExpression>(
-                multiply_func.return_type,  // Use the type determined by BindDecimalMultiply
-                multiply_func,             // Function with proper implementation
-                std::move(mult_children),  // Arguments
-                std::move(bind_data),      // Pass the bind data
-                true                       // Is operator
-            );*/
-            vector<ColumnBinding> bindings_to_exclude = {left_annot, right_annot};
-            auto projection = AddProjectionWithAnnot(std::move(op_node), std::move(mult_expr), "annot", bindings_to_exclude);
-            return projection;
-        } else if (left_has_annot) {
-            // Case 2: Only left child has annot
-            auto left_ref = make_uniq<BoundColumnRefExpression>(left_type, left_annot);
-            auto projection = AddProjectionWithAnnot(std::move(op_node), std::move(left_ref), "annot", {left_annot});
-            return projection;
-        } else if (right_has_annot) {
-            // Case 3: Only right child has annot
-            auto right_ref = make_uniq<BoundColumnRefExpression>(right_type, right_annot);
-            auto projection = AddProjectionWithAnnot(std::move(op_node), std::move(right_ref), "annot", {right_annot});
+            auto projection = AddProjectionWithAnnot(std::move(op_node), std::move(annot_exprs), "annot", bindings_to_exclude);
             return projection;
         } else {
-            // Case 4: Neither child has an annotation column
-            // Create a projection without adding an annotation column
-            auto projection = AddProjectionWithAnnot(std::move(op_node), nullptr, "", {});
-            return projection;
+            throw std::runtime_error("Not implemented in AddAnnotAttributeDFS");
         }
     } else {
-        // Process each child
         for (auto &child : op_node->children) {
             child = AddAnnotAttributeDFS(std::move(child));
         }
@@ -422,12 +447,29 @@ unique_ptr<LogicalOperator> AggregationPushdown::AddAnnotAttributeDFS(unique_ptr
     }
 }
 
-// Helper to find annot attribute in an operator
+// Returns all annotation columns from an operator
+bool AggregationPushdown::FindAllAnnotAttributes(LogicalOperator* op, vector<ColumnBinding>& annot_binding, vector<LogicalType>& annot_type) {
+    // Check in expressions for special operators
+    if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+        auto& proj = op->Cast<LogicalProjection>();
+        for (idx_t i = 0; i < proj.expressions.size(); i++) {
+            auto& expr = proj.expressions[i];
+            // Regular annot column
+            if (expr->GetName() == "annot") {
+                std::cout << "Found annot in projection at index " << i << std::endl;
+                annot_binding.push_back(ColumnBinding(proj.table_index, i));
+                annot_type.push_back(expr->return_type);
+            }
+        }
+    } else if (op->type == LogicalOperatorType::LOGICAL_GET) {
+        return false;
+    } else {
+        throw std::runtime_error("Unsupported operator type for FindAllAnnotAttributes");
+    }
+    return annot_binding.size() > 0;
+}
+
 bool AggregationPushdown::FindAnnotAttribute(LogicalOperator* op, ColumnBinding& annot_binding, LogicalType& annot_type) {
-    // Direct scan for annot column
-    std::cout << "At FindAnnotAttribute! " << std::endl;
-    auto bindings = op->GetColumnBindings();
-    
     // Check in expressions for special operators
     if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
         auto& proj = op->Cast<LogicalProjection>();
@@ -440,17 +482,10 @@ bool AggregationPushdown::FindAnnotAttribute(LogicalOperator* op, ColumnBinding&
                 return true;
             }
         }
-    }
-    
-    if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-        auto& agg = op->Cast<LogicalAggregate>();
-        for (idx_t i = 0; i < agg.expressions.size(); i++) {
-            if (agg.expressions[i]->GetName() == "annot") {
-                annot_binding = ColumnBinding(agg.aggregate_index, i);
-                annot_type = agg.expressions[i]->return_type;
-                return true;
-            }
-        }
+    } else if (op->type == LogicalOperatorType::LOGICAL_GET) {
+        return false;
+    } else {
+        throw std::runtime_error("Unsupported operator type for FindAnnotAttribute");
     }
 
     return false;
@@ -484,16 +519,16 @@ unique_ptr<LogicalOperator> AggregationPushdown::AddProjectionWithAnnot(unique_p
             op->types[i],
             bindings[i]
         );
+        // TODO: minmax_aggregate, we need to add all annot columns
         projection_expressions.push_back(std::move(col_ref));
-        // NOTE: Update to new binding
-        ColumnBinding old_binding = bindings[i];
-        ColumnBinding new_binding = ColumnBinding(projection_index, projection_expressions.size()-1);
-        global_binding_map[old_binding] = new_binding;
+        UpdateBindingMap(bindings[i], ColumnBinding(projection_index, projection_expressions.size()-1));
     }
     
     // Then add the annot expression
     if (annot_expr) {
         annot_expr->alias = name;
+        auto& col_ref = annot_expr->Cast<BoundColumnRefExpression>();
+        UpdateBindingMap(col_ref.binding, ColumnBinding(projection_index, projection_expressions.size()));
         projection_expressions.push_back(std::move(annot_expr));
     }
     
@@ -502,34 +537,79 @@ unique_ptr<LogicalOperator> AggregationPushdown::AddProjectionWithAnnot(unique_p
     // Add the original operator as child
     projection->AddChild(std::move(op));
     projection->ResolveOperatorTypes();
+    UpdateMinMax();
 
-    std::cout << "Projection created with index: " << projection_index << std::endl;
-    projection->Print();
+    // Return the new projection
+    return projection;
+}
+
+unique_ptr<LogicalOperator> AggregationPushdown::AddProjectionWithAnnot(unique_ptr<LogicalOperator> op, vector<unique_ptr<Expression>> annot_exprs, string name, vector<ColumnBinding> bindings_to_exclude) {       // Flag to control annotation placement
+    // Get bindings from operator
+    auto bindings = op->GetColumnBindings();
+    // Create expressions for projection
+    vector<unique_ptr<Expression>> projection_expressions;
+    // Create and return the projection
+    idx_t projection_index = binder.GenerateTableIndex();
+
+    for (idx_t i = 0; i < bindings.size(); i++) {
+        bool should_exclude = false;
+        for (const auto& exclude_binding : bindings_to_exclude) {
+            if (bindings[i] == exclude_binding) {
+                should_exclude = true;
+                break;
+            }
+        }
+        
+        if (should_exclude) {
+            continue;  // Skip this binding
+        }
+        auto col_ref = make_uniq<BoundColumnRefExpression>(
+            op->types[i],
+            bindings[i]
+        );
+        projection_expressions.push_back(std::move(col_ref));
+        UpdateBindingMap(bindings[i], ColumnBinding(projection_index, projection_expressions.size()-1));
+    }
+
+    // Then add all annotation expressions
+    for (idx_t i = 0; i < annot_exprs.size(); i++) {
+        if (annot_exprs[i]) {
+            annot_exprs[i]->alias = name;
+            auto& col_ref = annot_exprs[i]->Cast<BoundColumnRefExpression>();
+            UpdateBindingMap(col_ref.binding, ColumnBinding(projection_index, projection_expressions.size()));
+            projection_expressions.push_back(std::move(annot_exprs[i]));
+        }
+    }
     
+    auto projection = make_uniq<LogicalProjection>(projection_index, std::move(projection_expressions));
+    
+    // Add the original operator as child
+    projection->AddChild(std::move(op));
+    projection->ResolveOperatorTypes();
+    UpdateMinMax();
+
     // Return the new projection
     return projection;
 }
 
 unique_ptr<LogicalOperator> AggregationPushdown::CreateDynamicAggregate(unique_ptr<LogicalOperator> child_node) {
     // Extract child column information before we modify it
+    std::cout << "CreateDynamicAggregate" << std::endl;
+    child_node->Print();
     vector<ColumnBinding> child_bindings = child_node->GetColumnBindings();
     child_node->ResolveOperatorTypes();
     vector<LogicalType> child_types = child_node->types;
     
-    // Check if "annot" column exists
-    bool has_annot_column = false;
-    idx_t annot_idx = DConstants::INVALID_INDEX;
+    vector<idx_t> annot_indices;
     string annot_name = "annot";
     
-    if (child_node->type != LogicalOperatorType::LOGICAL_GET) {
+    if (child_node->type != LogicalOperatorType::LOGICAL_GET && child_node->type != LogicalOperatorType::LOGICAL_FILTER) {
         for (idx_t i = 0; i < child_node->expressions.size(); i++) {
             if (child_node->expressions[i]->GetName() == annot_name) {
-                has_annot_column = true;
-                annot_idx = i;
-                break;
+                annot_indices.push_back(i);
             }
         }
-    } 
+    }
     
     // Get next available table indices
     idx_t group_index = binder.GenerateTableIndex();
@@ -538,115 +618,161 @@ unique_ptr<LogicalOperator> AggregationPushdown::CreateDynamicAggregate(unique_p
     // Create the aggregate expression (COUNT(*) or SUM(annot))
     vector<unique_ptr<Expression>> select_list;
     
-    if (has_annot_column) {
-        std::cout << "Create SUM(annot)!" << std::endl;
-        vector<unique_ptr<Expression>> sum_args;
-        
-        // Create reference to annot column
-        auto annot_col_ref = make_uniq<BoundColumnRefExpression>(
-            // annot_name,
-            child_types[annot_idx],
-            child_bindings[annot_idx]
-        );
-        
-        sum_args.push_back(std::move(annot_col_ref));
-        
-        // Create an AggregateFunction object directly
-        // AggregateFunction sum_function("sum", {child_types[annot_idx]}, LogicalType(child_types[annot_idx]),
-        //                                 nullptr, nullptr, nullptr, nullptr, nullptr,
-        //                                FunctionNullHandling::DEFAULT_NULL_HANDLING);
-        // auto sum_function = aggregate_functions::SumFun::GetFunction(child_types[annot_idx]);
-        AggregateFunction sum_function = GetSumAggregate(child_types[annot_idx].InternalType());
-        if (sum_function.name.empty()) {
-            sum_function.name = "sum";
+    int agg_pos = 0;
+    if (annot_indices.size() > 0) {
+        if (query_type == QueryType::COUNT_STAR) {
+            std::cout << "Create SUM(annot)!" << std::endl;
+            vector<unique_ptr<Expression>> sum_args;
+            auto annot_idx = annot_indices[0];
+            
+            auto annot_col_ref = make_uniq<BoundColumnRefExpression>(
+                child_types[annot_idx],
+                child_bindings[annot_idx]
+            );
+            
+            sum_args.push_back(std::move(annot_col_ref));
+            
+            AggregateFunction sum_function = GetSumAggregate(child_types[annot_idx].InternalType());
+            if (sum_function.name.empty()) {
+                sum_function.name = "sum";
+            }
+
+            FunctionBinder function_binder(context);
+            auto sum_expr = function_binder.BindAggregateFunction(
+                sum_function, 
+                std::move(sum_args), 
+                nullptr, 
+                AggregateType::NON_DISTINCT
+            );
+            select_list.push_back(std::move(sum_expr));
+        } else if (query_type == QueryType::MINMAX_AGGREGATE) {
+            for (idx_t i = 0; i < annot_indices.size(); i++) {
+                auto annot_idx = annot_indices[i];
+                string agg_function_name;
+                vector<unique_ptr<Expression>> sum_args;
+
+                for (const auto& info : minmax_columns) {
+                    if (info.binding == child_bindings[annot_idx]) {
+                        std::cout << "Found minmax column: " << child_bindings[annot_idx].ToString() << std::endl;
+                        agg_function_name = info.function_name;
+                        break;
+                    }
+                }
+
+                vector<unique_ptr<Expression>> minmax_args;
+                // Create reference to annot column
+                auto annot_col_ref = make_uniq<BoundColumnRefExpression>(child_types[annot_idx], child_bindings[annot_idx]);
+                FunctionBinder function_binder(context);
+
+                sum_args.push_back(std::move(annot_col_ref));
+
+                if (agg_function_name == "min") {
+                    auto agg_function = GetMinAggregate(context, child_types[annot_idx]);
+                    auto sum_expr = function_binder.BindAggregateFunction(
+                        agg_function, 
+                        std::move(sum_args), 
+                        nullptr, 
+                        AggregateType::NON_DISTINCT
+                    );
+                    select_list.push_back(std::move(sum_expr));
+                } else if (agg_function_name == "max") {
+                    auto agg_function = GetMaxAggregate(context, child_types[annot_idx]);
+                    auto sum_expr = function_binder.BindAggregateFunction(
+                        agg_function, 
+                        std::move(sum_args), 
+                        nullptr, 
+                        AggregateType::NON_DISTINCT
+                    );
+                    select_list.push_back(std::move(sum_expr));
+                }
+                UpdateBindingMap(child_bindings[annot_idx], ColumnBinding(aggregate_index, agg_pos++));
+            }
         }
-
-        // sum_function.return_type = LogicalType::HUGEINT;  
-
-        FunctionBinder function_binder(context);
-        auto sum_expr = function_binder.BindAggregateFunction(
-            sum_function, 
-            std::move(sum_args), 
-            nullptr, 
-            AggregateType::NON_DISTINCT
-        );
-        /*
-        auto sum_expr = make_uniq<BoundAggregateExpression>(
-            sum_function,          // AggregateFunction instance
-            std::move(sum_args),   // Child expressions
-            nullptr,               // Filter (no filter)
-            nullptr,               // Bind info
-            AggregateType::NON_DISTINCT  // Not distinct
-        );*/
-        
-        // sum_expr->alias = "annot";      // Ensure it has the annot name
-        select_list.push_back(std::move(sum_expr));
     } else {
-        std::cout << "Create COUNT(*)!" << std::endl;
-        vector<unique_ptr<Expression>> empty_args;
+        if (query_type == QueryType::COUNT_STAR) {
+            std::cout << "Create COUNT(*)!" << std::endl;
+            vector<unique_ptr<Expression>> empty_args;
+            auto count_star_fun = CountStarFun::GetFunction();
+            if (count_star_fun.name.empty()) {
+                count_star_fun.name = "count_star";
+            }
     
-        // Create an AggregateFunction for COUNT(*)
-        // AggregateFunction count_star_function("count_star", {}, LogicalType(LogicalTypeId::BIGINT),
-        //                                       nullptr, nullptr, nullptr, nullptr, nullptr,
-        //                                       FunctionNullHandling::DEFAULT_NULL_HANDLING);
-        // auto count_star_function = aggregate_functions::CountStarFun::GetFunction();
-        // AggregateFunction count_star_function("count_star", empty_args, LogicalType::BIGINT);
-        auto count_star_fun = CountStarFun::GetFunction();
-        if (count_star_fun.name.empty()) {
-            count_star_fun.name = "count_star";
+            FunctionBinder function_binder(context);
+            auto count_star = function_binder.BindAggregateFunction(
+                count_star_fun, 
+                {}, 
+                nullptr, 
+                AggregateType::NON_DISTINCT
+            );
+            select_list.push_back(std::move(count_star));
+        } else if (query_type == QueryType::MINMAX_AGGREGATE) {
+            for (idx_t i = 0; i < child_bindings.size(); i++) {
+                for (const auto& info : minmax_columns) {
+                    if (info.binding == child_bindings[i]) {
+                        vector<unique_ptr<Expression>> sum_args;
+
+                        annot_indices.push_back(i);
+                        auto annot_col_ref = make_uniq<BoundColumnRefExpression>(child_types[i], child_bindings[i]);
+                        FunctionBinder function_binder(context);
+                        
+                        sum_args.push_back(std::move(annot_col_ref));
+
+                        if (info.function_name == "min") {
+                            auto agg_function = GetMinAggregate(context, child_types[i]);
+                            auto agg_expr = function_binder.BindAggregateFunction(
+                                agg_function, 
+                                std::move(sum_args), 
+                                nullptr, 
+                                AggregateType::NON_DISTINCT
+                            );
+                            select_list.push_back(std::move(agg_expr));
+
+                        } else if (info.function_name == "max") {
+                            auto agg_function = GetMaxAggregate(context, child_types[i]);
+                            auto agg_expr = function_binder.BindAggregateFunction(
+                                agg_function, 
+                                std::move(sum_args), 
+                                nullptr, 
+                                AggregateType::NON_DISTINCT
+                            );
+                            select_list.push_back(std::move(agg_expr));
+                        }
+                        UpdateBindingMap(child_bindings[i], ColumnBinding(aggregate_index, agg_pos++));
+                    }
+                }
+
+            }
         }
-
-        // count_star_fun.return_type = LogicalType::BIGINT;  // Set the return type to BIGINT
-
-
-        // count_star_fun.return_type = LogicalType::BIGINT;  // Set the return type to BIGINT
-
-        FunctionBinder function_binder(context);
-        auto count_star = function_binder.BindAggregateFunction(
-            count_star_fun, 
-            {}, 
-            nullptr, 
-            AggregateType::NON_DISTINCT
-        );
-        /*
-        auto count_star = make_uniq<BoundAggregateExpression>(
-            count_star_function,     // AggregateFunction instance
-            std::move(empty_args),   // No arguments for COUNT(*)
-            nullptr,                 // Filter (no filter)
-            nullptr,                 // Bind info
-            AggregateType::NON_DISTINCT  // Not distinct
-        );*/
-
-        // count_star->alias = "annot";    // Name the count(*) column as "annot"
-        select_list.push_back(std::move(count_star));
     }
     
     // Create the LogicalAggregate
     auto aggregate = make_uniq<LogicalAggregate>(group_index, aggregate_index, std::move(select_list));
-    
+
     int group_pos = 0;
-    // Add all columns except "annot" to GROUP BY
     for (idx_t i = 0; i < child_bindings.size(); i++) {
-        // Skip the annot column for grouping
-        if (has_annot_column && i == annot_idx) {
-            continue;
+        // Skip any annotation columns for grouping
+        bool is_annot_column = false;
+        for (const auto& annot_idx : annot_indices) {
+            if (i == annot_idx) {
+                is_annot_column = true;
+                break;
+            }
+        }
+        
+        if (is_annot_column) {
+            continue; // Skip this column for grouping
         }
         
         // Create GROUP BY expression for this column
         auto col_type = child_types[i];
         
         auto group_expr = make_uniq<BoundColumnRefExpression>(
-            // col_name,
             col_type,
-            child_bindings[i]  // Use NEW binding with the group_index
+            child_bindings[i]
         );
         
         aggregate->groups.push_back(std::move(group_expr));
-
-        // NOTE: Update to new binding
-        ColumnBinding old_binding = child_bindings[i];
-        ColumnBinding new_binding = ColumnBinding(group_index, group_pos++);
-        global_binding_map[old_binding] = new_binding;
+        UpdateBindingMap(child_bindings[i], ColumnBinding(group_index, group_pos++));
     }
     
     // Create a single grouping set with all group columns
@@ -680,28 +806,25 @@ unique_ptr<LogicalOperator> AggregationPushdown::CreateDynamicAggregate(unique_p
         );
     
         proj_expressions.push_back(std::move(proj_expr));
-        // Add binding mapping from aggregate to projection
-        ColumnBinding old_binding = group_binding;
-        ColumnBinding new_binding = ColumnBinding(projection_index, i);
-        global_binding_map[old_binding] = new_binding;
+        UpdateBindingMap(group_binding, ColumnBinding(projection_index, i));
     }
 
-    // Then add the aggregate result (with alias "annot")
     if (!aggregate->expressions.empty()) {
-        auto agg_binding = agg_bindings[aggregate->groups.size()]; // First binding after groups
-        auto agg_type = aggregate->expressions[0]->return_type;
-    
-        auto proj_expr = make_uniq<BoundColumnRefExpression>(
-            "annot",  // Set the alias here, only set alias in projection operator
-            agg_type,
-            agg_binding
-        );
-    
-        proj_expressions.push_back(std::move(proj_expr));
-        // Add binding mapping for the annot column
-        ColumnBinding old_binding = agg_binding;
-        ColumnBinding new_binding = ColumnBinding(projection_index, aggregate->groups.size());
-        global_binding_map[old_binding] = new_binding;
+        for (idx_t i = 0; i < aggregate->expressions.size(); i++) {
+            // Get the correct aggregate binding - groups come first in the binding list, then aggregates
+            auto agg_binding = ColumnBinding(aggregate->aggregate_index, i);
+            
+            auto proj_expr = make_uniq<BoundColumnRefExpression>(
+                "annot",
+                aggregate->expressions[i]->return_type,
+                agg_binding
+            );
+            proj_expr->ToString();
+            proj_expressions.push_back(std::move(proj_expr));
+            
+            // Update the binding map with the correct index in the projection
+            UpdateBindingMap(agg_binding, ColumnBinding(projection_index, i + aggregate->groups.size()));
+        }
     }
 
     // Create the projection
@@ -710,14 +833,65 @@ unique_ptr<LogicalOperator> AggregationPushdown::CreateDynamicAggregate(unique_p
         std::move(proj_expressions)
     );
 
-
-
     projection->AddChild(std::move(aggregate));
     projection->ResolveOperatorTypes();
-
-    // child_node = std::move(projection);
+    UpdateMinMax();
 
     return projection;
+}
+
+void AggregationPushdown::UpdateMinMax() {
+    if (query_type == QueryType::MINMAX_AGGREGATE) {
+        // Update the minmax_columns with the new bindings
+        for (auto& info : minmax_columns) {
+            ColumnBinding new_binding = GetUpdatedBinding(info.binding);
+            if (info.binding != new_binding) {
+                std::cout << "Updated min/max binding: " << info.binding.ToString() << " → " << new_binding.ToString() << std::endl;
+                info.binding = new_binding;
+            }
+        }
+    }
+}
+
+// Updates the global binding map with a new binding
+void AggregationPushdown::UpdateBindingMapOnce(const ColumnBinding old_binding, const ColumnBinding new_binding) {
+    if (old_binding == new_binding) {
+        return; // No need to update if they're the same
+    }
+    
+    global_binding_map[old_binding] = new_binding;
+    
+    std::cout << "Updated binding: " << old_binding.ToString() << " → " << new_binding.ToString() << std::endl;
+}
+
+// Updates the global binding map with a new binding
+void AggregationPushdown::UpdateBindingMap(const ColumnBinding old_binding, const ColumnBinding new_binding) {
+    if (old_binding == new_binding) {
+        return; // No need to update if they're the same
+    }
+    
+    // 1. First add the direct mapping
+    global_binding_map[old_binding] = new_binding;
+    
+    // 2. Then update any keys that map to old_binding to point to new_binding
+    for (auto& entry : global_binding_map) {
+        if (entry.first != old_binding && entry.second == old_binding) {
+            entry.second = new_binding;
+        }
+    }
+    
+    std::cout << "Updated binding: " << old_binding.ToString() << " → " << new_binding.ToString() << std::endl;
+}
+
+ColumnBinding AggregationPushdown::GetUpdatedBindingOnce(const ColumnBinding& original) {
+    // Only do a single lookup in the map instead of following the chain
+    if (global_binding_map.count(original) > 0) {
+        auto result = global_binding_map[original];
+        std::cout << "GetUpdatedBinding: " << original.ToString() << " → " << result.ToString() << std::endl;
+        return result;
+    }
+    
+    return original;
 }
 
 ColumnBinding AggregationPushdown::GetUpdatedBinding(const ColumnBinding& original) {
@@ -731,8 +905,11 @@ ColumnBinding AggregationPushdown::GetUpdatedBinding(const ColumnBinding& origin
             break;
         }
     }
+    std::cout << "GetUpdatedBinding: " << original.ToString() << " → " << current.ToString() << std::endl;
     return current;
 }
+
+
 
 void AggregationPushdown::UpdateJoinConditions(LogicalComparisonJoin& join) {
     // Process each child separately
@@ -808,6 +985,7 @@ unique_ptr<LogicalOperator> AggregationPushdown::PruneAggregationColumns(unique_
         // Process left child
         if (join.children[0]->type == LogicalOperatorType::LOGICAL_PROJECTION) {
             std::cout << "Pruning left projection, aggregation and projection columns with projection_map" << std::endl;
+            // join.children[0]->Print();
             PruneAggregationWithProjectionMap(join.children[0].get());
             // Clear the join's left projection map
         }
@@ -815,6 +993,7 @@ unique_ptr<LogicalOperator> AggregationPushdown::PruneAggregationColumns(unique_
         // Process right child
         if (join.children[1]->type == LogicalOperatorType::LOGICAL_PROJECTION) {
             std::cout << "Pruning right projection, aggregation and projection columns with projection_map" << std::endl;
+            // join.children[1]->Print();
             PruneAggregationWithProjectionMap(join.children[1].get());
         }
         // UpdateJoinConditions(join); The direct connected operator has already been updated
@@ -844,6 +1023,7 @@ unique_ptr<LogicalOperator> AggregationPushdown::UpdateAnnotMul(unique_ptr<Logic
         auto& join = op_node->children[0]->Cast<LogicalComparisonJoin>();
         
         // Check if the last expression is our multiplication expression named "annot"
+        // TODO: Here, only consider the last expression COUNT(*), we need to check all aggregation expressions
         if (!proj.expressions.empty()) {
             auto& last_expr = proj.expressions.back();
             
@@ -897,10 +1077,13 @@ void AggregationPushdown::PruneAggregationWithProjectionMap(LogicalOperator* op)
     // Get references to all operators in the chain
     auto &top_proj = op->Cast<LogicalProjection>();
     auto &agg = op->children[0]->Cast<LogicalAggregate>();
-    bool has_bottom_proj = (agg.children.size() == 1 && 
-                           agg.children[0]->type == LogicalOperatorType::LOGICAL_PROJECTION);
-    LogicalProjection* bottom_proj = has_bottom_proj ? 
-                                    &agg.children[0]->Cast<LogicalProjection>() : nullptr;
+    bool has_bottom_proj = (agg.children.size() == 1 && agg.children[0]->type == LogicalOperatorType::LOGICAL_PROJECTION);
+    LogicalProjection* bottom_proj = has_bottom_proj ? &agg.children[0]->Cast<LogicalProjection>() : nullptr;
+
+    // Nothing to prune
+    if (top_proj.expressions.size() < agg.expressions.size()) {
+        return; 
+    }
 
     // Step 1: Analyze top projection to determine which columns to keep in aggregate
     std::unordered_set<idx_t> kept_group_indices; // index need to keep in aggregation
@@ -932,6 +1115,22 @@ void AggregationPushdown::PruneAggregationWithProjectionMap(LogicalOperator* op)
                 }
             }
         }
+        for (idx_t i = 0; i < agg.expressions.size(); i++) {
+            auto &agg_expr = agg.expressions[i];
+                // Handle the SUM function specifically - this is more reliable than general binding updates
+                if (agg_expr->type == ExpressionType::BOUND_AGGREGATE) {
+                    auto &bound_agg = agg_expr->Cast<BoundAggregateExpression>();
+                    for (auto &child : bound_agg.children) {
+                        if (child->type == ExpressionType::BOUND_COLUMN_REF) {
+                            auto &col_ref = child->Cast<BoundColumnRefExpression>();
+                            // If this binding refers to a column in the bottom projection
+                            if (col_ref.binding.table_index == bottom_proj->table_index) {
+                                needed_bottom_columns.insert(col_ref.binding.column_index);
+                            }
+                        }
+                    }
+                }
+        }
         // Step 3: Prune bottom projection if needed
         if (needed_bottom_columns.size() < bottom_proj->expressions.size()) {
             vector<unique_ptr<Expression>> new_bottom_exprs;
@@ -940,75 +1139,80 @@ void AggregationPushdown::PruneAggregationWithProjectionMap(LogicalOperator* op)
             
             // Prune and map in a single pass
             for (idx_t i = 0; i < bottom_proj->expressions.size(); i++) {
-                if (needed_bottom_columns.count(i) > 0 || i == bottom_proj->expressions.size() - 1) {
+                if (needed_bottom_columns.count(i) > 0 || bottom_proj->expressions[i]->GetName() == "annot") {
                     // Store old → new mapping
                     column_index_map[i] = new_idx++;
                     
                     // Add the expression to keep
                     new_bottom_exprs.push_back(std::move(bottom_proj->expressions[i]));
                     
-                    // Update global binding map only for non-annot column
-                    if (i != bottom_proj->expressions.size() - 1) {
-                        ColumnBinding old_binding(bottom_proj->table_index, i);
-                        ColumnBinding new_binding(bottom_proj->table_index, new_idx - 1);
-                        global_binding_map[old_binding] = new_binding;
-                    }
+                    // Update global binding map only for non-annot column, here, only prune child or comparion extra column, no need to update root min/max binding
+                    UpdateBindingMapOnce(ColumnBinding(bottom_proj->table_index, i), ColumnBinding(bottom_proj->table_index, new_idx - 1));
                 }
             }
             
             // Update the bottom projection
             bottom_proj->expressions = std::move(new_bottom_exprs);
-            bottom_proj->types.clear();
-            for (auto &expr : bottom_proj->expressions) {
-                bottom_proj->types.push_back(expr->return_type);
-            }
+            bottom_proj->ResolveOperatorTypes();
             
             // Update column references in one combined pass through aggregate
             for (auto &group : agg.groups) {
                 if (group->type == ExpressionType::BOUND_COLUMN_REF) {
                     auto &col_ref = group->Cast<BoundColumnRefExpression>();
                     if (col_ref.binding.table_index == bottom_proj->table_index) {
-                        col_ref.binding = GetUpdatedBinding(col_ref.binding);
+                        col_ref.binding = GetUpdatedBindingOnce(col_ref.binding);
                     }
                 }
             }
-            auto &agg_expr = agg.expressions[0];
-            // Handle the SUM function specifically - this is more reliable than general binding updates
-            if (agg_expr->type == ExpressionType::BOUND_AGGREGATE) {
-                auto &bound_agg = agg_expr->Cast<BoundAggregateExpression>();
-                // Check if this is a SUM function
-                if (bound_agg.function.name == "sum" && !bound_agg.children.empty()) {
-                    std::cout << "Updating SUM function argument" << std::endl;
-                    // For each child of the sum function (typically just one argument)
-                    for (auto &child : bound_agg.children) {
-                        if (child->type == ExpressionType::BOUND_COLUMN_REF) {
-                            auto &col_ref = child->Cast<BoundColumnRefExpression>();
-                            // If this binding refers to a column in the bottom projection
-                            if (col_ref.binding.table_index == bottom_proj->table_index) {
-                                // Get the original column index
-                                col_ref.binding.column_index = bottom_proj->expressions.size() - 1;
-                            }
-                        } else if (child->type == ExpressionType::OPERATOR_CAST) {
-                            // Handle the case where the child is a cast expression
-                            auto &cast_expr = child->Cast<BoundCastExpression>();
-                            if (cast_expr.child->type == ExpressionType::BOUND_COLUMN_REF) {
-                                auto &col_ref = cast_expr.child->Cast<BoundColumnRefExpression>();
+            for (idx_t i = 0; i < agg.expressions.size(); i++) {
+                auto &agg_expr = agg.expressions[i];
+                // Handle the SUM function specifically - this is more reliable than general binding updates
+                if (agg_expr->type == ExpressionType::BOUND_AGGREGATE) {
+                    auto &bound_agg = agg_expr->Cast<BoundAggregateExpression>();
+                    // Check if this is a SUM function
+                    if (bound_agg.function.name == "sum" && !bound_agg.children.empty()) {
+                        std::cout << "Updating SUM function argument" << std::endl;
+                        // For each child of the sum function (typically just one argument)
+                        for (auto &child : bound_agg.children) {
+                            if (child->type == ExpressionType::BOUND_COLUMN_REF) {
+                                auto &col_ref = child->Cast<BoundColumnRefExpression>();
+                                // If this binding refers to a column in the bottom projection
                                 if (col_ref.binding.table_index == bottom_proj->table_index) {
+                                    // Get the original column index
+                                    // TODO: Fix here, we assume the last to be annot column, actually only relative offset change, the order didn't change, size() - k
                                     col_ref.binding.column_index = bottom_proj->expressions.size() - 1;
                                 }
-                            }
-                        } else if (child->type == ExpressionType::CAST) {
-                            // Handle the case where the child is a cast expression
-                            auto &cast_expr = child->Cast<BoundCastExpression>();
-                            if (cast_expr.child->type == ExpressionType::BOUND_COLUMN_REF) {
-                                auto &col_ref = cast_expr.child->Cast<BoundColumnRefExpression>();
-                                if (col_ref.binding.table_index == bottom_proj->table_index) {
-                                    col_ref.binding.column_index = bottom_proj->expressions.size() - 1;
+                            } else if (child->type == ExpressionType::OPERATOR_CAST) {
+                                // Handle the case where the child is a cast expression
+                                auto &cast_expr = child->Cast<BoundCastExpression>();
+                                if (cast_expr.child->type == ExpressionType::BOUND_COLUMN_REF) {
+                                    auto &col_ref = cast_expr.child->Cast<BoundColumnRefExpression>();
+                                    if (col_ref.binding.table_index == bottom_proj->table_index) {
+                                        col_ref.binding.column_index = bottom_proj->expressions.size() - 1;
+                                    }
                                 }
+                            } else if (child->type == ExpressionType::CAST) {
+                                // Handle the case where the child is a cast expression
+                                auto &cast_expr = child->Cast<BoundCastExpression>();
+                                if (cast_expr.child->type == ExpressionType::BOUND_COLUMN_REF) {
+                                    auto &col_ref = cast_expr.child->Cast<BoundColumnRefExpression>();
+                                    if (col_ref.binding.table_index == bottom_proj->table_index) {
+                                        col_ref.binding.column_index = bottom_proj->expressions.size() - 1;
+                                    }
+                                }
+                            } else {
+                                throw std::runtime_error("Unsupported aggregate expression type 2 in PruneAggregationWithProjectionMap");
                             }
-                        } else {
-                            throw std::runtime_error("Unsupported aggregate expression type 2 in PruneAggregationWithProjectionMap");
                         }
+                    } else if ((bound_agg.function.name == "min" || bound_agg.function.name == "max") && !bound_agg.children.empty()) {
+                        for (auto &child : bound_agg.children) {
+                            if (child->type == ExpressionType::BOUND_COLUMN_REF) {
+                                auto &col_ref = child->Cast<BoundColumnRefExpression>();
+                                col_ref.binding = GetUpdatedBindingOnce(col_ref.binding);
+                            }
+                        }
+                    } else {
+                        throw std::runtime_error("Unsupported aggregate expression type 1 in PruneAggregationWithProjectionMap");
                     }
                 }
             }
@@ -1020,26 +1224,18 @@ void AggregationPushdown::PruneAggregationWithProjectionMap(LogicalOperator* op)
     vector<unique_ptr<Expression>> new_groups;
     vector<unique_ptr<Expression>> new_agg_exprs;
     
-    agg.types.clear();
     idx_t new_group_idx = 0;
     
     // Process groups - combine pruning, binding update, and type tracking
     for (idx_t i = 0; i < agg.groups.size(); i++) {
         if (kept_group_indices.count(i) > 0) {
-            // Store binding mapping
-            ColumnBinding old_binding(agg.group_index, i);
-            ColumnBinding new_binding(agg.group_index, new_group_idx++);
-            global_binding_map[old_binding] = new_binding;
-            
-            // Add to types and new groups in one step
-            agg.types.push_back(agg.groups[i]->return_type);
+            UpdateBindingMapOnce(ColumnBinding(agg.group_index, i), ColumnBinding(agg.group_index, new_group_idx++));
             new_groups.push_back(std::move(agg.groups[i]));
         }
     }
     
     // Process aggregate expressions - annot! 
     for (idx_t i = 0; i < agg.expressions.size(); i++) {
-        agg.types.push_back(agg.expressions[i]->return_type);
         new_agg_exprs.push_back(std::move(agg.expressions[i]));
     }
     
@@ -1061,23 +1257,13 @@ void AggregationPushdown::PruneAggregationWithProjectionMap(LogicalOperator* op)
     for (auto &expr : top_proj.expressions) {
         if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
             auto &col_ref = expr->Cast<BoundColumnRefExpression>();
-            col_ref.binding = GetUpdatedBinding(col_ref.binding);
+            col_ref.binding = GetUpdatedBindingOnce(col_ref.binding);
         }
-    }
-    
-    // Update types in one pass
-    top_proj.types.clear();
-    for (auto &expr : top_proj.expressions) {
-        top_proj.types.push_back(expr->return_type);
     }
     
     agg.ResolveOperatorTypes();
     top_proj.ResolveOperatorTypes();
     
-    std::cout << "After pruning: Aggregate has " << agg.groups.size() << " groups and " 
-              << agg.expressions.size() << " expressions" << std::endl;
-
-
     return ;
 }
 

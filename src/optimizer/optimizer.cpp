@@ -24,7 +24,6 @@
 #include "duckdb/optimizer/statistics_propagator.hpp"
 #include "duckdb/optimizer/topn_optimizer.hpp"
 #include "duckdb/optimizer/unnest_rewriter.hpp"
-#include "duckdb/optimizer/aggregation_pushdown.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/planner.hpp"
 
@@ -131,7 +130,7 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		plan->Print();
 	});
 
-	// NOTE: Add query type detection here
+	// NOTE: Two pass for full query optimization
 #ifdef YANPLUS
 	auto query_type = DetectQueryType(plan.get());
 	std::cout << "Query Type: " << static_cast<int>(query_type) << std::endl;
@@ -163,19 +162,16 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		plan = unnest_rewriter.Optimize(std::move(plan));
 	});
 
-#ifdef YANPLUS
-	if (query_type == QueryType::COUNT_STAR) {
+#ifdef YANPLUS // NOTE: Optimiztion for aggregation
+	if (query_type == QueryType::COUNT_STAR || query_type == QueryType::MINMAX_AGGREGATE) {
 		std::cout << "Before AGGREGATION_PUSHDOWN Plan " << std::endl;
 		plan->Print();
 		PrintOperatorBindings(plan.get());
 
 		RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
-			AggregationPushdown aggregation_pushdown(binder, context);
+			AggregationPushdown aggregation_pushdown(binder, context, query_type);
 			plan = aggregation_pushdown.Rewrite(std::move(plan));
 		});
-		std::cout << "After AddAnnotAttributeDFS! Binding" << std::endl;
-		plan->Print();
-		PrintOperatorBindings(plan.get());
 	}
 #endif
 
@@ -253,12 +249,12 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 	}
 
 #ifdef YANPLUS
-	if (query_type == QueryType::COUNT_STAR) {
+	if (query_type == QueryType::COUNT_STAR || query_type == QueryType::MINMAX_AGGREGATE) {
 		std::cout << "Before AGGREGATION_PUSHDOWN Join projection prune " << std::endl;
 		plan->Print();
 		PrintOperatorBindings(plan.get());
 		RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
-			AggregationPushdown aggregation_pushdown(binder, context);
+			AggregationPushdown aggregation_pushdown(binder, context, query_type);
 			plan = aggregation_pushdown.UpdateBinding(std::move(plan));
 		});
 	}
