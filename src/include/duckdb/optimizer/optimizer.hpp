@@ -29,6 +29,7 @@ public:
 	ClientContext &GetContext();
 
 	QueryType DetectQueryType(LogicalOperator* op);
+	int DetermineMaxHeight(LogicalOperator* op);
 	void PrintOperatorBindings(LogicalOperator* op, const string& prefix = "");
 
 	ClientContext &context;

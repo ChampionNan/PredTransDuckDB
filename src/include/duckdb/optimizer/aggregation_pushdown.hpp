@@ -26,6 +26,9 @@ enum class QueryType {
 };
 
 class AggregationPushdown {
+
+    using AggOptFunc = void (AggregationPushdown::*)(LogicalOperator*);
+
 public:
     // Add this to your class declaration in aggregation_pushdown.hpp
     struct MinMaxColumnInfo {
@@ -76,7 +79,7 @@ public:
 
     string GetColumnName(LogicalOperator* op, idx_t idx);
 
-    unique_ptr<LogicalOperator> PruneAggregationColumns(unique_ptr<LogicalOperator> op);
+    unique_ptr<LogicalOperator> PruneAggregation(unique_ptr<LogicalOperator> op, AggOptFunc func);
 
     bool CheckPKFK(LogicalOperator* op);
 
@@ -84,13 +87,15 @@ public:
 
     void PruneAggregationWithProjectionMap(LogicalOperator* op);
 
+    void RemoveHeavyAggregation(LogicalOperator* op);
+
 private:
     Binder &binder;
     ClientContext &context;
     QueryType query_type;
 
     std::unordered_map<ColumnBinding, ColumnBinding, ColumnBindingHashFunction> global_binding_map;
-    vector<MinMaxColumnInfo> minmax_columns;  // Store MIN/MAX column info
+    static vector<MinMaxColumnInfo> minmax_columns;  // Store MIN/MAX column info
 
 };
 

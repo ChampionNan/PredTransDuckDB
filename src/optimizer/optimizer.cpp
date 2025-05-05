@@ -166,20 +166,48 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 	if (query_type == QueryType::COUNT_STAR || query_type == QueryType::MINMAX_AGGREGATE) {
 		std::cout << "Before AGGREGATION_PUSHDOWN Plan " << std::endl;
 		plan->Print();
-		PrintOperatorBindings(plan.get());
+		// PrintOperatorBindings(plan.get());
 
 		RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
 			AggregationPushdown aggregation_pushdown(binder, context, query_type);
 			plan = aggregation_pushdown.Rewrite(std::move(plan));
 		});
+
+		std::cout << "Before AGGREGATION_PUSHDOWN Prune " << std::endl;
+		plan->Print();
+        int max_height = DetermineMaxHeight(plan.get());
+        std::cout << "Max Height: " << max_height << std::endl;
+		for (int i = 0; i < max_height; i++) {
+            RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
+                RemoveUnusedColumns unused(binder, context, true);
+                unused.VisitOperator(*plan);
+            });
+            RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
+                AggregationPushdown aggregation_pushdown(binder, context, query_type);
+                plan = aggregation_pushdown.UpdateBinding(std::move(plan));
+            });
+        }
+        std::cout << "After RemoveUnusedColumns " << std::endl;
+        plan->Print();
+        PrintOperatorBindings(plan.get());
+        /*
+        RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
+            AggregationPushdown aggregation_pushdown(binder, context, query_type);
+            plan = aggregation_pushdown.PruneAggregation(std::move(plan), &AggregationPushdown::RemoveHeavyAggregation);
+        });
+        std::cout << "After RemoveHeavyAggregation" << std::endl;
+        plan->Print();
+        PrintOperatorBindings(plan.get());*/
 	}
 #endif
 
-	// removes unused columns
-	RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
+#ifndef YANPLUS
+    // removes unused columns
+    RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
 		RemoveUnusedColumns unused(binder, context, true);
 		unused.VisitOperator(*plan);
 	});
+#endif // !YANPLUS
 
 	RunOptimizer(OptimizerType::IN_CLAUSE, [&]() {
 		InClauseRewriter ic_rewriter(context, *this);
@@ -247,18 +275,6 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 			optimizer_extension.optimize_function(context, optimizer_extension.optimizer_info.get(), plan);
 		});
 	}
-
-#ifdef YANPLUS
-	if (query_type == QueryType::COUNT_STAR || query_type == QueryType::MINMAX_AGGREGATE) {
-		std::cout << "Before AGGREGATION_PUSHDOWN Join projection prune " << std::endl;
-		plan->Print();
-		PrintOperatorBindings(plan.get());
-		RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
-			AggregationPushdown aggregation_pushdown(binder, context, query_type);
-			plan = aggregation_pushdown.UpdateBinding(std::move(plan));
-		});
-	}
-#endif
 
 	std::cout << "After All Optimizations Plan " << std::endl;
 	plan->Print();
@@ -356,6 +372,27 @@ QueryType Optimizer::DetectQueryType(LogicalOperator* op) {
     
     // Any other query pattern
     return QueryType::OTHER;
+}
+
+int Optimizer::DetermineMaxHeight(LogicalOperator* op) {
+    if (!op) {
+        return 0;
+    }
+    
+    // Find max height among children
+    int max_child_height = 0;
+    for (auto& child : op->children) {
+        int child_height = DetermineMaxHeight(child.get());
+        max_child_height = std::max(max_child_height, child_height);
+    }
+    
+    // Only increment height for join operators
+    bool is_join = (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || 
+                    op->type == LogicalOperatorType::LOGICAL_ASOF_JOIN ||
+                    op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+                    op->type == LogicalOperatorType::LOGICAL_ANY_JOIN);
+                    
+    return max_child_height + (is_join ? 1 : 0);
 }
 
 
