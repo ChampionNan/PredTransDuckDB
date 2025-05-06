@@ -190,14 +190,14 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
         std::cout << "After RemoveUnusedColumns " << std::endl;
         plan->Print();
         PrintOperatorBindings(plan.get());
-        /*
+        
         RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
             AggregationPushdown aggregation_pushdown(binder, context, query_type);
             plan = aggregation_pushdown.PruneAggregation(std::move(plan), &AggregationPushdown::RemoveHeavyAggregation);
         });
         std::cout << "After RemoveHeavyAggregation" << std::endl;
         plan->Print();
-        PrintOperatorBindings(plan.get());*/
+        PrintOperatorBindings(plan.get());
 	}
 #endif
 
@@ -276,9 +276,9 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		});
 	}
 
-	std::cout << "After All Optimizations Plan " << std::endl;
-	plan->Print();
-	PrintOperatorBindings(plan.get());
+	// std::cout << "After All Optimizations Plan " << std::endl;
+	// plan->Print();
+	// PrintOperatorBindings(plan.get());
 
 	// auto total_end = std::chrono::high_resolution_clock::now();
 	// std::cout << "Total Opt Time: " << std::chrono::duration_cast<std::chrono::microseconds>(total_end - total_start).count() << " µs" << std::endl;

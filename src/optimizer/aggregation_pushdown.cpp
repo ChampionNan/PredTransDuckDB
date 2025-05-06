@@ -465,12 +465,27 @@ bool AggregationPushdown::FindAllAnnotAttributes(LogicalOperator* op, vector<Col
                 annot_type.push_back(expr->return_type);
             }
         }
+        return annot_binding.size() > 0;
     } else if (op->type == LogicalOperatorType::LOGICAL_GET || op->type == LogicalOperatorType::LOGICAL_FILTER) {
         return false;
+    } else if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+               op->type == LogicalOperatorType::LOGICAL_ASOF_JOIN ||
+               op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ) {
+        auto& join = op->Cast<LogicalComparisonJoin>();
+        bool found_any = false;
+
+        if (FindAllAnnotAttributes(join.children[0].get(), annot_binding, annot_type)) {
+            found_any = true;
+        }
+
+        if (FindAllAnnotAttributes(join.children[1].get(), annot_binding, annot_type)) {
+            found_any = true;
+        }
+        
+        return found_any;
     } else {
         throw std::runtime_error("Unsupported operator type for FindAllAnnotAttributes");
     }
-    return annot_binding.size() > 0;
 }
 
 bool AggregationPushdown::FindAnnotAttribute(LogicalOperator* op, ColumnBinding& annot_binding, LogicalType& annot_type) {
@@ -488,6 +503,22 @@ bool AggregationPushdown::FindAnnotAttribute(LogicalOperator* op, ColumnBinding&
         }
     } else if (op->type == LogicalOperatorType::LOGICAL_GET || op->type == LogicalOperatorType::LOGICAL_FILTER) {
         return false;
+    } else if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+               op->type == LogicalOperatorType::LOGICAL_ASOF_JOIN ||
+               op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ) {
+        auto& join = op->Cast<LogicalComparisonJoin>();
+        bool found_any = false;
+
+        if (FindAnnotAttribute(join.children[0].get(), annot_binding, annot_type)) {
+            found_any = true;
+            if (found_any) return true;
+        }
+
+        if (FindAnnotAttribute(join.children[1].get(), annot_binding, annot_type)) {
+            found_any = true;
+        }
+        
+        return found_any;
     } else {
         throw std::runtime_error("Unsupported operator type for FindAnnotAttribute");
     }
@@ -1360,20 +1391,72 @@ void AggregationPushdown::RemoveHeavyAggregation(LogicalOperator* op) {
         // Heavy aggregation! 
         if (agg.groups.size() > GROUP_BY_NUM) {
             if (has_bottom_proj) {
-                auto &bottom_proj = agg.children[0]->Cast<LogicalProjection>();
+                if (query_type == QueryType::MINMAX_AGGREGATE) {
+                    auto &bottom_proj = agg.children[0]->Cast<LogicalProjection>();
                 
-                // Extract data source (will move it later)
-                auto original_source = std::move(bottom_proj.children[0]);
-                
-                // Move expressions from bottom projection to top projection
-                // This is more memory efficient than creating new expressions
-                top_proj.expressions = std::move(bottom_proj.expressions);
-                
-                // Connect top projection directly to the original data source
-                top_proj.children[0] = std::move(original_source);
-                
-                // Update the projection's output types to match expressions
-                top_proj.ResolveOperatorTypes();
+                    auto original_source = std::move(bottom_proj.children[0]);
+                    
+                    top_proj.expressions = std::move(bottom_proj.expressions);
+                    
+                    top_proj.children[0] = std::move(original_source);
+                    
+                    top_proj.ResolveOperatorTypes();
+                } else if (query_type == QueryType::COUNT_STAR) {
+                    auto &bottom_proj = agg.children[0]->Cast<LogicalProjection>();
+                    auto original_source = std::move(bottom_proj.children[0]);
+                    vector<ColumnBinding> source_annot_bindings;
+                    vector<LogicalType> source_annot_types;
+                    bool source_has_annot = FindAllAnnotAttributes(original_source.get(), source_annot_bindings, source_annot_types);
+
+                    if (bottom_proj.expressions.size() > 0 && bottom_proj.expressions.back()->GetName() == "annot") {
+                        bool is_column_ref = (bottom_proj.expressions.back()->type == ExpressionType::BOUND_COLUMN_REF);
+                        bool is_function = (bottom_proj.expressions.back()->type == ExpressionType::BOUND_FUNCTION);
+                        std::string function_name;
+                        if (is_function) {
+                            function_name = bottom_proj.expressions.back()->Cast<BoundFunctionExpression>().function.name;
+                        }
+                        if (is_column_ref) {
+                            if (!source_has_annot) {
+                                // remove last annot expression
+                                vector<unique_ptr<Expression>> new_expressions;
+                                for (idx_t i = 0; i < bottom_proj.expressions.size() - 1; i++) {
+                                    new_expressions.push_back(std::move(bottom_proj.expressions[i]));
+                                }
+                                top_proj.expressions = std::move(new_expressions);
+                            } else {
+                                top_proj.expressions = std::move(bottom_proj.expressions);
+                            }
+                        } else if (is_function && function_name == "*") {
+                            if (!source_has_annot) {
+                                vector<unique_ptr<Expression>> new_expressions;
+                                for (idx_t i = 0; i < bottom_proj.expressions.size() - 1; i++) {
+                                    new_expressions.push_back(std::move(bottom_proj.expressions[i]));
+                                }
+                                top_proj.expressions = std::move(new_expressions);
+                            } else {
+                                if (source_annot_bindings.size() == 2) {
+                                    top_proj.expressions = std::move(bottom_proj.expressions);
+                                } else {
+                                    vector<unique_ptr<Expression>> new_expressions;
+                                    for (idx_t i = 0; i < bottom_proj.expressions.size() - 1; i++) {
+                                        new_expressions.push_back(std::move(bottom_proj.expressions[i]));
+                                    }
+                                    auto new_ref = make_uniq<BoundColumnRefExpression>("annot", source_annot_types[0], source_annot_bindings[0]);
+                                    new_expressions.push_back(std::move(new_ref));
+                                    top_proj.expressions = std::move(new_expressions);
+                                }
+                            }
+                        } else {
+                            throw std::runtime_error("Unsupported expression type in RemoveHeavyAggregation");
+                        }
+                    } else {
+                        top_proj.expressions = std::move(bottom_proj.expressions);
+                    }
+                    top_proj.children[0] = std::move(original_source);
+                    top_proj.ResolveOperatorTypes();
+                } else {
+                    throw std::runtime_error("Unsupported query type in RemoveHeavyAggregation");
+                }
             } else {
                 throw std::runtime_error("Bottom projection not found in RemoveHeavyAggregation");
             }
