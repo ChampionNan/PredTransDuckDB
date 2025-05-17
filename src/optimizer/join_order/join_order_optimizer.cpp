@@ -88,38 +88,53 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOpera
     // std::cout << "Dumping all query graph edges in Optimize:" << std::endl;
     // const auto &query_graph = query_graph_manager.GetQueryGraphEdges();
     // std::cout << query_graph.ToString() << std::endl; // Use ToString() which is const-qualified
-
-
-	if (reorderable) {
+	if (GYO) {
 		// query graph now has filters and relations
 		auto cost_model = CostModel(query_graph_manager);
-
 		// Initialize a plan enumerator.
-		auto plan_enumerator =
-		    PlanEnumerator(query_graph_manager, cost_model, query_graph_manager.GetQueryGraphEdges());
+		auto plan_enumerator = PlanEnumerator(query_graph_manager, cost_model, query_graph_manager.GetQueryGraphEdges());
+		
+		auto gyo_join_tree = plan_enumerator.SolveJoinOrderGYO();
+		if (gyo_join_tree) {
+			new_logical_plan = query_graph_manager.Reconstruct(std::move(plan), *gyo_join_tree);
+		} else {
+			// Unable to handle with GYO
+			GYO = false;
+		}
+	}
 
-		// Initialize the leaf/single node plans
-		plan_enumerator.InitLeafPlans();
-
-		// Ask the plan enumerator to enumerate a number of join orders
-#ifdef ExactLeftDeep
-		auto final_plan = plan_enumerator.SolveJoinOrderLeftDeep();
-#elif defined(RandomBushy)
-		auto final_plan = plan_enumerator.SolveJoinOrderRandom();
-#elif defined(RandomLeftDeep)
-		auto final_plan = plan_enumerator.SolveJoinOrderLeftDeepRandom();
-#else
-		auto final_plan = plan_enumerator.SolveJoinOrder();
-#endif
-		// TODO: add in the check that if no plan exists, you have to add a cross product.
-
-		// now reconstruct a logical plan from the query graph plan
-		new_logical_plan = query_graph_manager.Reconstruct(std::move(plan), *final_plan);
-	} else {
-		new_logical_plan = std::move(plan);
-		if (relation_stats.size() == 1) {
-			new_logical_plan->estimated_cardinality = relation_stats.at(0).cardinality;
-			new_logical_plan->has_estimated_cardinality = true;
+	if (!GYO) {
+		if (reorderable) {
+			// query graph now has filters and relations
+			auto cost_model = CostModel(query_graph_manager);
+	
+			// Initialize a plan enumerator.
+			auto plan_enumerator =
+				PlanEnumerator(query_graph_manager, cost_model, query_graph_manager.GetQueryGraphEdges());
+	
+			// Initialize the leaf/single node plans
+			plan_enumerator.InitLeafPlans();
+	
+			// Ask the plan enumerator to enumerate a number of join orders
+	#ifdef ExactLeftDeep
+			auto final_plan = plan_enumerator.SolveJoinOrderLeftDeep();
+	#elif defined(RandomBushy)
+			auto final_plan = plan_enumerator.SolveJoinOrderRandom();
+	#elif defined(RandomLeftDeep)
+			auto final_plan = plan_enumerator.SolveJoinOrderLeftDeepRandom();
+	#else
+			auto final_plan = plan_enumerator.SolveJoinOrder();
+	#endif
+			// TODO: add in the check that if no plan exists, you have to add a cross product.
+	
+			// now reconstruct a logical plan from the query graph plan
+			new_logical_plan = query_graph_manager.Reconstruct(std::move(plan), *final_plan);
+		} else {
+			new_logical_plan = std::move(plan);
+			if (relation_stats.size() == 1) {
+				new_logical_plan->estimated_cardinality = relation_stats.at(0).cardinality;
+				new_logical_plan->has_estimated_cardinality = true;
+			}
 		}
 	}
 
@@ -170,28 +185,45 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::CallSolveJoinOrderFixed(unique_p
 		std::cout << relation.ToString() << std::endl;
 	}
 #endif
-	if (reorderable) {
+	if (GYO) {
 		// query graph now has filters and relations
 		auto cost_model = CostModel(query_graph_manager);
-
 		// Initialize a plan enumerator.
-		auto plan_enumerator =
-		    PlanEnumerator(query_graph_manager, cost_model, query_graph_manager.GetQueryGraphEdges());
+		auto plan_enumerator = PlanEnumerator(query_graph_manager, cost_model, query_graph_manager.GetQueryGraphEdges());
+		
+		auto gyo_join_tree = plan_enumerator.SolveJoinOrderGYO();
+		if (gyo_join_tree) {
+			new_logical_plan = query_graph_manager.Reconstruct(std::move(plan), *gyo_join_tree);
+		} else {
+			// Unable to handle with GYO
+			GYO = false;
+		}
+	}
 
-		// Initialize the leaf/single node plans
-		plan_enumerator.InitLeafPlans();
-
-		// Ask the plan enumerator to enumerate a number of join orders
-		auto final_plan = plan_enumerator.SolveJoinOrderFixed(exec_order);
-		// TODO: add in the check that if no plan exists, you have to add a cross product.
-
-		// now reconstruct a logical plan from the query graph plan
-		new_logical_plan = query_graph_manager.Reconstruct(std::move(plan), *final_plan);
-	} else {
-		new_logical_plan = std::move(plan);
-		if (relation_stats.size() == 1) {
-			new_logical_plan->estimated_cardinality = relation_stats.at(0).cardinality;
-			new_logical_plan->has_estimated_cardinality = true;
+	if (!GYO) {
+		if (reorderable) {
+			// query graph now has filters and relations
+			auto cost_model = CostModel(query_graph_manager);
+	
+			// Initialize a plan enumerator.
+			auto plan_enumerator =
+				PlanEnumerator(query_graph_manager, cost_model, query_graph_manager.GetQueryGraphEdges());
+	
+			// Initialize the leaf/single node plans
+			plan_enumerator.InitLeafPlans();
+	
+			// Ask the plan enumerator to enumerate a number of join orders
+			auto final_plan = plan_enumerator.SolveJoinOrderFixed(exec_order);
+			// TODO: add in the check that if no plan exists, you have to add a cross product.
+	
+			// now reconstruct a logical plan from the query graph plan
+			new_logical_plan = query_graph_manager.Reconstruct(std::move(plan), *final_plan);
+		} else {
+			new_logical_plan = std::move(plan);
+			if (relation_stats.size() == 1) {
+				new_logical_plan->estimated_cardinality = relation_stats.at(0).cardinality;
+				new_logical_plan->has_estimated_cardinality = true;
+			}
 		}
 	}
 

@@ -828,4 +828,305 @@ unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderFixed(vector<LogicalOperator*
 	}
 	return nullptr;
 }
+
+RelationalHypergraph PlanEnumerator::BuildRelationalHypergraph() {
+    RelationalHypergraph graph;
+    idx_t next_vertex_id = 0;
+    
+    // Map to track join equivalence classes
+    unordered_map<ColumnBinding, unordered_set<ColumnBinding, ColumnBindingHash>, ColumnBindingHash> equivalence_classes;
+    
+    // First pass: identify join equivalence classes
+    for (auto& filter_info : query_graph_manager.GetFilterBindings()) {
+        if (filter_info->filter->type == ExpressionType::COMPARE_EQUAL) {
+            // Add both bindings to the same equivalence class
+            equivalence_classes[filter_info->left_binding].insert(filter_info->right_binding);
+            equivalence_classes[filter_info->right_binding].insert(filter_info->left_binding);
+            
+            // Make sure each binding is in its own equivalence class too
+            equivalence_classes[filter_info->left_binding].insert(filter_info->left_binding);
+            equivalence_classes[filter_info->right_binding].insert(filter_info->right_binding);
+        }
+    }
+    
+    // Merge equivalence classes transitively
+    bool changes_made;
+    do {
+        changes_made = false;
+        for (auto& [binding, equiv_set] : equivalence_classes) {
+            size_t original_size = equiv_set.size();
+            
+            // Create a copy to avoid modifying during iteration
+            auto equiv_copy = equiv_set;
+            for (auto& equiv_binding : equiv_copy) {
+                if (equiv_binding != binding) {
+                    // Merge all bindings from this equivalence class
+                    for (auto& transitive_binding : equivalence_classes[equiv_binding]) {
+                        equiv_set.insert(transitive_binding);
+                    }
+                }
+            }
+            
+            if (equiv_set.size() > original_size) {
+                changes_made = true;
+            }
+        }
+    } while (changes_made);
+    
+    // Assign the same vertex ID to all members of each equivalence class
+    unordered_map<ColumnBinding, idx_t, ColumnBindingHash> binding_to_vertex;
+    for (auto& [binding, equiv_set] : equivalence_classes) {
+        if (binding_to_vertex.find(binding) == binding_to_vertex.end()) {
+            // Assign a new vertex ID to this entire equivalence class
+            idx_t vertex_id = next_vertex_id++;
+            for (auto& equiv_binding : equiv_set) {
+                binding_to_vertex[equiv_binding] = vertex_id;
+            }
+            
+            // Only store one representative column binding for this vertex
+            graph.vertex_to_column.push_back(binding);
+        }
+    }
+    
+    // Transfer the final mapping
+    graph.column_to_vertex = binding_to_vertex;
+    
+    // Second pass: create hyperedges (relations)
+    for (idx_t rel_idx = 0; rel_idx < query_graph_manager.relation_manager.NumRelations(); rel_idx++) {
+        unordered_set<idx_t> relation_vertices;
+        
+        // Find all attributes that belong to this relation
+        for (auto& [column, vertex_id] : graph.column_to_vertex) {
+            if (column.table_index == rel_idx) {
+                relation_vertices.insert(vertex_id);
+            }
+        }
+        
+        // Only add relations that have vertices (are involved in joins)
+        if (!relation_vertices.empty()) {
+            graph.relations.push_back(std::move(relation_vertices));
+            graph.relation_indices.push_back(rel_idx);
+        }
+    }
+    
+    return graph;
+}
+
+bool PlanEnumerator::IsEar(RelationalHypergraph& graph, idx_t relation_idx, idx_t& witness_idx) {
+    const auto& relation = graph.relations[relation_idx];
+    
+    // Find attributes unique to this relation
+    unordered_set<idx_t> unique_attrs;
+    for (auto vertex : relation) {
+        bool is_unique = true;
+        
+        // Check if this vertex appears in any other relation
+        for (idx_t other_idx = 0; other_idx < graph.relations.size(); other_idx++) {
+            if (other_idx == relation_idx) {
+                continue;
+            }
+            
+            if (graph.relations[other_idx].find(vertex) != graph.relations[other_idx].end()) {
+                is_unique = false;
+                break;
+            }
+        }
+        
+        if (is_unique) {
+            unique_attrs.insert(vertex);
+        }
+    }
+    
+    // If no unique attributes, not an ear
+    if (unique_attrs.empty()) {
+        return false;
+    }
+    
+    // Find shared attributes (all attributes minus unique ones)
+    unordered_set<idx_t> shared_attrs;
+    for (auto vertex : relation) {
+        if (unique_attrs.find(vertex) == unique_attrs.end()) {
+            shared_attrs.insert(vertex);
+        }
+    }
+    
+    // If no shared attributes, it's an ear with any other relation as witness
+    if (shared_attrs.empty()) {
+        // Find any other relation to be the witness
+        for (idx_t i = 0; i < graph.relations.size(); i++) {
+            if (i != relation_idx && !graph.relations[i].empty()) {
+                witness_idx = i;
+                return true;
+            }
+        }
+        // If no other relations exist, this is the only relation - technically an ear
+        return true;
+    }
+    
+    // Check if all shared attributes are contained in a single other relation (witness)
+    for (idx_t other_idx = 0; other_idx < graph.relations.size(); other_idx++) {
+        if (other_idx == relation_idx) {
+            continue;
+        }
+        
+        const auto& other_relation = graph.relations[other_idx];
+        bool contains_all_shared = true;
+        
+        for (auto shared_attr : shared_attrs) {
+            if (other_relation.find(shared_attr) == other_relation.end()) {
+                contains_all_shared = false;
+                break;
+            }
+        }
+        
+        if (contains_all_shared) {
+            // Found a witness!
+            witness_idx = other_idx;
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+bool PlanEnumerator::RunGYOAlgorithm() {
+    // Build the relational hypergraph
+    auto graph = BuildRelationalHypergraph();
+    
+    // Clear any previous reduction sequence
+    gyo_reduction_sequence.clear();
+    
+    // No relations or trivial case
+    if (graph.relations.size() <= 1) {
+        return true;
+    }
+    
+    // Perform GYO reduction
+    bool progress_made = true;
+    while (progress_made && !graph.relations.empty()) {
+        progress_made = false;
+        
+        for (idx_t i = 0; i < graph.relations.size(); i++) {
+            idx_t witness_idx = 0;
+            if (IsEar(graph, i, witness_idx)) {
+                // Record this reduction step
+                GYOReductionStep step;
+                step.ear_relation_idx = graph.relation_indices[i];
+                
+                if (i != witness_idx && witness_idx < graph.relation_indices.size()) {
+                    step.witness_relation_idx = graph.relation_indices[witness_idx];
+                } else {
+                    // If there's no proper witness, use the ear itself
+                    step.witness_relation_idx = graph.relation_indices[i];
+                }
+                
+                gyo_reduction_sequence.push_back(step);
+                
+                // Remove this relation's unique vertices from the graph
+                unordered_set<idx_t> unique_vertices;
+                for (auto vertex : graph.relations[i]) {
+                    bool is_unique = true;
+                    for (idx_t j = 0; j < graph.relations.size(); j++) {
+                        if (j == i) continue;
+                        if (graph.relations[j].find(vertex) != graph.relations[j].end()) {
+                            is_unique = false;
+                            break;
+                        }
+                    }
+                    if (is_unique) {
+                        unique_vertices.insert(vertex);
+                    }
+                }
+                
+      
+                
+                graph.relations.erase(graph.relations.begin() + i);
+                    graph.relation_indices.erase(graph.relation_indices.begin() + i);
+                
+                progress_made = true;
+                break;
+            }
+        }
+    }
+    
+    // If the graph is empty, the query is acyclic
+    return graph.relations.empty();
+}
+
+unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderGYO() {
+    // First run the GYO algorithm if not already done
+    if (gyo_reduction_sequence.empty()) {
+        if (!RunGYOAlgorithm()) {
+            // Query is cyclic, can't use GYO
+            return nullptr;
+        }
+    }
+    
+    // Map for tracking relation sets to their corresponding join nodes
+    unordered_map<JoinRelationSet*, unique_ptr<JoinNode>> join_map;
+    
+    // First create a leaf node for each base relation
+    for (idx_t i = 0; i < query_graph_manager.relation_manager.NumRelations(); i++) {
+        auto& relation_set = query_graph_manager.set_manager.GetJoinRelation(i);
+        auto relation_stats = query_graph_manager.relation_manager.GetRelationStats();
+        
+        auto node = make_uniq<JoinNode>(relation_set);
+		// FIXME: Check stats here?
+        node->cardinality = relation_stats[i].cardinality;
+        
+        join_map[&relation_set] = std::move(node);
+    }
+    
+    // Process the reduction sequence in the original order (bottom-up)
+    for (auto& step : gyo_reduction_sequence) {
+        // Skip if ear and witness are the same (single relation)
+        if (step.ear_relation_idx == step.witness_relation_idx) {
+            continue;
+        }
+        
+        // Get the relation sets
+        auto& ear_set = query_graph_manager.set_manager.GetJoinRelation(step.ear_relation_idx);
+        auto& witness_set = query_graph_manager.set_manager.GetJoinRelation(step.witness_relation_idx);
+        
+        // Get connections between these relations - similar to the plan enumerator
+        auto connections = query_graph.GetConnections(ear_set, witness_set);
+        
+        // Create the union relation set
+        auto& union_set = query_graph_manager.set_manager.Union(ear_set, witness_set);
+        
+        // Get the existing plans for both relation sets
+        auto ear_plan = join_map.find(&ear_set);
+        auto witness_plan = join_map.find(&witness_set);
+        
+        D_ASSERT(ear_plan != join_map.end());
+        D_ASSERT(witness_plan != join_map.end());
+        
+        if (!connections.empty()) {
+            // We have connections, use them directly
+            auto join_node = CreateJoinTree(union_set, connections, *ear_plan->second, *witness_plan->second);
+			join_map[&union_set] = std::move(join_node);
+        } else {
+			throw Exception("No connections found between ear and witness relation sets.");
+		}
+    }
+    
+    // Find the node with maximum relations as the root
+    JoinRelationSet* root_set = nullptr;
+    size_t max_relations = 0;
+    
+    for (auto& entry : join_map) {
+        if (entry.first->count > max_relations) {
+            max_relations = entry.first->count;
+            root_set = entry.first;
+        }
+    }
+    
+    // Return the root join node
+    if (root_set) {
+        return std::move(join_map[root_set]);
+    }
+    
+    return nullptr;
+}
+
 } // namespace duckdb

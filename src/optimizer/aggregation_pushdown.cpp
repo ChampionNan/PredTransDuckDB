@@ -104,8 +104,7 @@ void AggregationPushdown::StoreMinMaxAggregates(LogicalOperator* op) {
                 
                 // Add to our tracking vector
                 minmax_columns.push_back(info);
-                
-                std::cout << "Stored MIN/MAX aggregate: " << info.ToString() << std::endl;
+                // std::cout << "Stored MIN/MAX aggregate: " << info.ToString() << std::endl;
             }
         }
     }
@@ -292,7 +291,7 @@ bool AggregationPushdown::CheckPKFK(LogicalOperator* op) {
                 // For single-column unique constraint (primary key or unique)
                 if (unique_constraint.index.index != DConstants::INVALID_INDEX) {
                     if (unique_constraint.index.index == actual_col_idx) {
-                        std::cout << "Found unique constraint on column: " << get_op.names[col_idx] << std::endl;
+                        // std::cout << "Found unique constraint on column: " << get_op.names[col_idx] << std::endl;
                         return true;
                     }
                 }
@@ -304,7 +303,7 @@ bool AggregationPushdown::CheckPKFK(LogicalOperator* op) {
                     // Check if column name is in the unique constraint
                     for (auto& constraint_col : unique_constraint.columns) {
                         if (constraint_col == column_name) {
-                            std::cout << "Found column in multi-column unique constraint: " << column_name << std::endl;
+                            // std::cout << "Found column in multi-column unique constraint: " << column_name << std::endl;
                             return true;
                         }
                     }
@@ -320,8 +319,6 @@ unique_ptr<LogicalOperator> AggregationPushdown::AddAnnotAttributeDFS(unique_ptr
     if (!op_node) {
         return op_node;
     }
-    std::cout << "At AddAnnotAttributeDFS" << std::endl;
-    op_node->Print();
     // Special handling for join operators
     if (op_node->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
         op_node->type == LogicalOperatorType::LOGICAL_ASOF_JOIN ||
@@ -339,13 +336,13 @@ unique_ptr<LogicalOperator> AggregationPushdown::AddAnnotAttributeDFS(unique_ptr
         // Check if any column from left child is a unique key
         if (CheckPKFK(join.children[0].get())) {
             addLeft = false;
-            std::cout << "Left child has unique key, skipping annot" << std::endl;
+            // std::cout << "Left child has unique key, skipping annot" << std::endl;
         }
         
         // Check if any column from right child is a unique key
         if (CheckPKFK(join.children[1].get())) {
             addRight = false;
-            std::cout << "Right child has unique key, skipping annot" << std::endl;
+            // std::cout << "Right child has unique key, skipping annot" << std::endl;
         }
 
         if (addLeft) {
@@ -460,7 +457,7 @@ bool AggregationPushdown::FindAllAnnotAttributes(LogicalOperator* op, vector<Col
             auto& expr = proj.expressions[i];
             // Regular annot column
             if (expr->GetName() == "annot") {
-                std::cout << "Found annot in projection at index " << i << std::endl;
+                // std::cout << "Found annot in projection at index " << i << std::endl;
                 annot_binding.push_back(ColumnBinding(proj.table_index, i));
                 annot_type.push_back(expr->return_type);
             }
@@ -495,7 +492,7 @@ bool AggregationPushdown::FindAnnotAttribute(LogicalOperator* op, ColumnBinding&
         for (idx_t i = 0; i < proj.expressions.size(); i++) {
             auto& expr = proj.expressions[i];
             if (expr->GetName() == "annot") {
-                std::cout << "Found annot in projection!" << std::endl;
+                // std::cout << "Found annot in projection!" << std::endl;
                 annot_binding = ColumnBinding(proj.table_index, i);
                 annot_type = expr->return_type;
                 return true;
@@ -732,7 +729,7 @@ unique_ptr<LogicalOperator> AggregationPushdown::CreateDynamicAggregate(unique_p
     int agg_pos = 0;
     if (annot_indices.size() > 0) {
         if (query_type == QueryType::COUNT_STAR) {
-            std::cout << "Create SUM(annot)!" << std::endl;
+            // std::cout << "Create SUM(annot)!" << std::endl;
             vector<unique_ptr<Expression>> sum_args;
             auto annot_idx = annot_indices[0];
             
@@ -764,7 +761,7 @@ unique_ptr<LogicalOperator> AggregationPushdown::CreateDynamicAggregate(unique_p
 
                 for (const auto& info : minmax_columns) {
                     if (info.binding == child_bindings[annot_idx]) {
-                        std::cout << "Found minmax column: " << child_bindings[annot_idx].ToString() << std::endl;
+                        // std::cout << "Found minmax column: " << child_bindings[annot_idx].ToString() << std::endl;
                         agg_function_name = info.function_name;
                         break;
                     }
@@ -801,7 +798,7 @@ unique_ptr<LogicalOperator> AggregationPushdown::CreateDynamicAggregate(unique_p
         }
     } else {
         if (query_type == QueryType::COUNT_STAR) {
-            std::cout << "Create COUNT(*)!" << std::endl;
+            // std::cout << "Create COUNT(*)!" << std::endl;
             vector<unique_ptr<Expression>> empty_args;
             auto count_star_fun = CountStarFun::GetFunction();
             if (count_star_fun.name.empty()) {
@@ -930,7 +927,6 @@ unique_ptr<LogicalOperator> AggregationPushdown::CreateDynamicAggregate(unique_p
                 aggregate->expressions[i]->return_type,
                 agg_binding
             );
-            proj_expr->ToString();
             proj_expressions.push_back(std::move(proj_expr));
             
             // Update the binding map with the correct index in the projection
@@ -957,7 +953,7 @@ void AggregationPushdown::UpdateMinMax() {
         for (auto& info : minmax_columns) {
             ColumnBinding new_binding = GetUpdatedBinding(info.binding);
             if (info.binding != new_binding) {
-                std::cout << "Updated min/max binding: " << info.binding.ToString() << " → " << new_binding.ToString() << std::endl;
+                // std::cout << "Updated min/max binding: " << info.binding.ToString() << " → " << new_binding.ToString() << std::endl;
                 info.binding = new_binding;
             }
         }
@@ -1016,7 +1012,7 @@ ColumnBinding AggregationPushdown::GetUpdatedBinding(const ColumnBinding& origin
             break;
         }
     }
-    std::cout << "GetUpdatedBinding: " << original.ToString() << " → " << current.ToString() << std::endl;
+    // std::cout << "GetUpdatedBinding: " << original.ToString() << " → " << current.ToString() << std::endl;
     return current;
 }
 
@@ -1160,20 +1156,19 @@ unique_ptr<LogicalOperator> AggregationPushdown::UpdateAnnotMul(unique_ptr<Logic
                                 auto& col_ref = child->Cast<BoundColumnRefExpression>();
                                 // First child's binding should be left annot
                                 if (i == 0) {
-                                    std ::cout << "Updating left child binding" << std::endl;
-                                    std::cout << left_annot.ToString() << std::endl;
+                                    // std ::cout << "Updating left child binding" << std::endl;
+                                    // std::cout << left_annot.ToString() << std::endl;
                                     col_ref.binding = left_annot;
                                 }
                                 // Second child's binding should be right annot
                                 else if (i == 1) {
-                                    std::cout << "Updating right child binding" << std::endl;
-                                    std::cout << right_annot.ToString() << std::endl;
+                                    // std::cout << "Updating right child binding" << std::endl;
+                                    // std::cout << right_annot.ToString() << std::endl;
                                     col_ref.binding = right_annot;
                                 }
                             }
                         }
-                        
-                        std::cout << "Updated multiplication expression bindings for annot" << std::endl;
+                        // std::cout << "Updated multiplication expression bindings for annot" << std::endl;
                     } else {
                         // FIXME: 
                         throw std::runtime_error("Annot attribute not found in join children");
@@ -1187,6 +1182,8 @@ unique_ptr<LogicalOperator> AggregationPushdown::UpdateAnnotMul(unique_ptr<Logic
 
 void AggregationPushdown::PruneAggregationWithProjectionMap(LogicalOperator* op) {
     // Get references to all operators in the chain
+    std::cout << "PruneAggregationWithProjectionMap" << std::endl;
+    op->Print();
     auto &top_proj = op->Cast<LogicalProjection>();
     auto &agg = op->children[0]->Cast<LogicalAggregate>();
     bool has_bottom_proj = (agg.children.size() == 1 && agg.children[0]->type == LogicalOperatorType::LOGICAL_PROJECTION);
@@ -1256,7 +1253,20 @@ void AggregationPushdown::PruneAggregationWithProjectionMap(LogicalOperator* op)
                     column_index_map[i] = new_idx++;
                     
                     // Add the expression to keep
-                    new_bottom_exprs.push_back(std::move(bottom_proj->expressions[i]));
+                    auto &expr = bottom_proj->expressions[i];
+                    if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+                        auto &col_ref = expr->Cast<BoundColumnRefExpression>();
+                        col_ref.binding = GetUpdatedBindingOnce(col_ref.binding);
+                    } else if (expr->type == ExpressionType::BOUND_FUNCTION) {
+                        auto &func_expr = expr->Cast<BoundFunctionExpression>();
+                        for (auto &child : func_expr.children) {
+                            if (child->type == ExpressionType::BOUND_COLUMN_REF) {
+                                auto &col_ref = child->Cast<BoundColumnRefExpression>();
+                                col_ref.binding = GetUpdatedBindingOnce(col_ref.binding);
+                            }
+                        }
+                    }
+                    new_bottom_exprs.push_back(std::move(expr));
                     
                     // Update global binding map only for non-annot column, here, only prune child or comparion extra column, no need to update root min/max binding
                     UpdateBindingMapOnce(ColumnBinding(bottom_proj->table_index, i), ColumnBinding(bottom_proj->table_index, new_idx - 1));
@@ -1283,7 +1293,7 @@ void AggregationPushdown::PruneAggregationWithProjectionMap(LogicalOperator* op)
                     auto &bound_agg = agg_expr->Cast<BoundAggregateExpression>();
                     // Check if this is a SUM function
                     if (bound_agg.function.name == "sum" && !bound_agg.children.empty()) {
-                        std::cout << "Updating SUM function argument" << std::endl;
+                        // std::cout << "Updating SUM function argument" << std::endl;
                         // For each child of the sum function (typically just one argument)
                         for (auto &child : bound_agg.children) {
                             if (child->type == ExpressionType::BOUND_COLUMN_REF) {
@@ -1372,6 +1382,17 @@ void AggregationPushdown::PruneAggregationWithProjectionMap(LogicalOperator* op)
         if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
             auto &col_ref = expr->Cast<BoundColumnRefExpression>();
             col_ref.binding = GetUpdatedBindingOnce(col_ref.binding);
+        } else if (expr->type == ExpressionType::BOUND_FUNCTION) {
+            // Handle scalar functions like multiplication (annot1 * annot2)
+            auto &func_expr = expr->Cast<BoundFunctionExpression>();
+        
+            // Update bindings in all child expressions
+            for (auto &child : func_expr.children) {
+                if (child->type == ExpressionType::BOUND_COLUMN_REF) {
+                    auto &child_ref = child->Cast<BoundColumnRefExpression>();
+                    child_ref.binding = GetUpdatedBindingOnce(child_ref.binding);
+                }
+            }
         }
     }
     

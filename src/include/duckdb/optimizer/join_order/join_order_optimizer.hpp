@@ -26,7 +26,7 @@ namespace duckdb {
 
 class JoinOrderOptimizer {
 public:
-	explicit JoinOrderOptimizer(ClientContext &context) : context(context), query_graph_manager(context) {
+	explicit JoinOrderOptimizer(ClientContext &context, bool GYO = false) : context(context), query_graph_manager(context), GYO(GYO) {
 	}
 
 	//! Perform join reordering inside a plan
@@ -72,6 +72,8 @@ private:
 	bool full_plan_found;
 	bool must_update_full_plan;
 	unordered_set<std::string> join_nodes_in_full_plan;
+
+	bool GYO;
 
 	//! Extract the bindings referred to by an Expression
 	bool ExtractBindings(Expression &expression, unordered_set<idx_t> &bindings);

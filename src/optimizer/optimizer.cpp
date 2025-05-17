@@ -123,11 +123,15 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 	// then we perform the join ordering optimization
 	// this also rewrites cross products + filters into joins and performs filter pushdowns
 	// auto start2 = std::chrono::high_resolution_clock::now();
+    bool GYO = false;
+
 	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
-		JoinOrderOptimizer optimizer(context);
+		JoinOrderOptimizer optimizer(context, GYO);
 		plan = optimizer.Optimize(std::move(plan));
+#ifdef PLAN_DEBUG
 		std::cout << "After First Join Order Plan " << std::endl;
 		plan->Print();
+#endif // DEBUG
 	});
 
 	// NOTE: Two pass for full query optimization
@@ -144,15 +148,19 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 			std::cout << "BFOrder Node: " << node->ParamsToString() << std::endl;
 		}*/
 		RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
-			JoinOrderOptimizer optimizer2(context);
+			JoinOrderOptimizer optimizer2(context, GYO);
 			plan = optimizer2.CallSolveJoinOrderFixed(std::move(plan), BFOrder);
+#ifdef PLAN_DEBUG
 			std::cout << "After Second Join Order Plan Begin " << std::endl;
 			plan->Print();
+#endif
 		});
 		plan = PT.Optimize(std::move(plan));
+#ifdef PLAN_DEBUG
 		std::cout << "After PT Plan " << std::endl;
 		plan->Print();
 		PT.PrintUseBFAndRelatedCreate(plan);
+#endif
 	}
 #endif
 
@@ -164,17 +172,20 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 
 #ifdef YANPLUS // NOTE: Optimiztion for aggregation
 	if (query_type == QueryType::COUNT_STAR || query_type == QueryType::MINMAX_AGGREGATE) {
+#ifdef PLAN_DEBUG
 		std::cout << "Before AGGREGATION_PUSHDOWN Plan " << std::endl;
 		plan->Print();
 		// PrintOperatorBindings(plan.get());
+#endif
 
 		RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
 			AggregationPushdown aggregation_pushdown(binder, context, query_type);
 			plan = aggregation_pushdown.Rewrite(std::move(plan));
 		});
-
+#ifdef PLAN_DEBUG
 		std::cout << "Before AGGREGATION_PUSHDOWN Prune " << std::endl;
 		plan->Print();
+#endif
         int max_height = DetermineMaxHeight(plan.get());
         std::cout << "Max Height: " << max_height << std::endl;
 		for (int i = 0; i < max_height; i++) {
@@ -187,17 +198,20 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
                 plan = aggregation_pushdown.UpdateBinding(std::move(plan));
             });
         }
+#ifdef PLAN_DEBUG
         std::cout << "After RemoveUnusedColumns " << std::endl;
         plan->Print();
         PrintOperatorBindings(plan.get());
-        
+#endif // DEBUG
         RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
             AggregationPushdown aggregation_pushdown(binder, context, query_type);
             plan = aggregation_pushdown.PruneAggregation(std::move(plan), &AggregationPushdown::RemoveHeavyAggregation);
         });
+#ifdef PLAN_DEBUG
         std::cout << "After RemoveHeavyAggregation" << std::endl;
         plan->Print();
         PrintOperatorBindings(plan.get());
+#endif // DEBUG
 	}
 #endif
 
@@ -277,7 +291,7 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 	}
 
 	// std::cout << "After All Optimizations Plan " << std::endl;
-	// plan->Print();
+	plan->Print();
 	// PrintOperatorBindings(plan.get());
 
 	// auto total_end = std::chrono::high_resolution_clock::now();
