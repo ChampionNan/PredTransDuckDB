@@ -27,7 +27,7 @@ enum class QueryType {
 
 class AggregationPushdown {
 
-    using AggOptFunc = void (AggregationPushdown::*)(LogicalOperator*);
+    using AggOptFunc = unique_ptr<LogicalOperator> (AggregationPushdown::*)(unique_ptr<LogicalOperator>);
 
 public:
     // Add this to your class declaration in aggregation_pushdown.hpp
@@ -41,12 +41,21 @@ public:
         }
     };
 
+    struct JoinInfo {
+        int join_id;  // Sequential ID
+        bool left_pushdown;
+        bool right_pushdown;
+    };
+
+
 public:
     explicit AggregationPushdown(Binder &binder, ClientContext &context, QueryType query_type) : binder(binder), context(context), query_type(query_type) {
         global_binding_map.clear();
     }
 
     unique_ptr<LogicalOperator> Rewrite(unique_ptr<LogicalOperator> op);
+
+    unique_ptr<LogicalOperator> ApplyAgg(unique_ptr<LogicalOperator> op);
 
     unique_ptr<LogicalOperator> UpdateBinding(unique_ptr<LogicalOperator> op);
 
@@ -64,11 +73,12 @@ public:
 
     ColumnBinding GetUpdatedBinding(const ColumnBinding& original);
 
-    unique_ptr<LogicalOperator> AddAnnotAttributeDFS(unique_ptr<LogicalOperator> op_node);
+    unique_ptr<LogicalOperator> AddAnnotAttributeDFS(unique_ptr<LogicalOperator> op_node, bool applyFlag = false);
 
     bool FindAllAnnotAttributes(LogicalOperator* op, vector<ColumnBinding>& annot_binding, vector<LogicalType>& annot_type);
-
     bool FindAnnotAttribute(LogicalOperator* op, ColumnBinding& annot_binding, LogicalType& annot_type);
+
+    void GetAnnotColumnBindingsIdx(LogicalOperator* op, vector<idx_t>& annot_indices);
 
     unique_ptr<LogicalOperator> AddProjectionWithAnnot(unique_ptr<LogicalOperator> op, unique_ptr<Expression> annot_expr, string name, vector<ColumnBinding> bindings_to_exclude);
     unique_ptr<LogicalOperator> AddProjectionWithAnnot(unique_ptr<LogicalOperator> op, vector<unique_ptr<Expression>> annot_exprs, string name, vector<ColumnBinding> bindings_to_exclude);
@@ -79,15 +89,21 @@ public:
 
     string GetColumnName(LogicalOperator* op, idx_t idx);
 
+    // void ResetJoinCondition(JoinCondition &condition, JoinSide side);
+
     unique_ptr<LogicalOperator> PruneAggregation(unique_ptr<LogicalOperator> op, AggOptFunc func);
 
     bool CheckPKFK(LogicalOperator* op);
 
     unique_ptr<LogicalOperator> UpdateAnnotMul(unique_ptr<LogicalOperator> op_node);
 
-    void PruneAggregationWithProjectionMap(LogicalOperator* op);
+    unique_ptr<LogicalOperator> PruneAggregationWithProjectionMap(unique_ptr<LogicalOperator> op);
 
-    void RemoveHeavyAggregation(LogicalOperator* op);
+    bool NotHasTooManyGroups(unique_ptr<LogicalOperator>& op);
+
+    void RecordAggPushdown(unique_ptr<LogicalOperator>& op);
+
+    unique_ptr<LogicalOperator> RemoveHeavyAggregation(unique_ptr<LogicalOperator> op);
 
 private:
     Binder &binder;
@@ -96,7 +112,7 @@ private:
 
     std::unordered_map<ColumnBinding, ColumnBinding, ColumnBindingHashFunction> global_binding_map;
     static vector<MinMaxColumnInfo> minmax_columns;  // Store MIN/MAX column info
-
+    static vector<JoinInfo> join_pushdown_info;
 };
 
 } // namespace duckdb

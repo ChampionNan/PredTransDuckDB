@@ -18,6 +18,8 @@ namespace duckdb {
 struct CountStarFun {
 	static AggregateFunction GetFunction();
 
+	// static AggregateFunction GetFunction(const LogicalType &type);
+
 	static void RegisterFunction(BuiltinFunctions &set);
 };
 

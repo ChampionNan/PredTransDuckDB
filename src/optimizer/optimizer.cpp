@@ -171,24 +171,52 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 	});
 
 #ifdef YANPLUS // NOTE: Optimiztion for aggregation
+    // Flag for add aggregation pushdown
+
 	if (query_type == QueryType::COUNT_STAR || query_type == QueryType::MINMAX_AGGREGATE) {
 #ifdef PLAN_DEBUG
+        unique_ptr<LogicalOperator> plan_copy = plan->Copy(context);
 		std::cout << "Before AGGREGATION_PUSHDOWN Plan " << std::endl;
-		plan->Print();
+		plan_copy->Print();
 		// PrintOperatorBindings(plan.get());
 #endif
-
 		RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
 			AggregationPushdown aggregation_pushdown(binder, context, query_type);
-			plan = aggregation_pushdown.Rewrite(std::move(plan));
+			plan_copy = aggregation_pushdown.Rewrite(std::move(plan_copy));
 		});
-#ifdef PLAN_DEBUG
-		std::cout << "Before AGGREGATION_PUSHDOWN Prune " << std::endl;
-		plan->Print();
-#endif
-        int max_height = DetermineMaxHeight(plan.get());
+        int max_height = DetermineMaxHeight(plan_copy.get());
         std::cout << "Max Height: " << max_height << std::endl;
 		for (int i = 0; i < max_height; i++) {
+            RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
+                RemoveUnusedColumns unused(binder, context, true);
+                unused.VisitOperator(*plan_copy);
+            });
+            RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
+                AggregationPushdown aggregation_pushdown(binder, context, query_type);
+                plan_copy = aggregation_pushdown.UpdateBinding(std::move(plan_copy));
+            });
+        }
+#ifdef PLAN_DEBUG
+        std::cout << "After First Agg Pass " << std::endl;
+        plan_copy->Print();
+        // PrintOperatorBindings(plan_copy.get());
+#endif // DEBUG
+        /*
+        RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
+            AggregationPushdown aggregation_pushdown(binder, context, query_type);
+            plan = aggregation_pushdown.PruneAggregation(std::move(plan), &AggregationPushdown::RemoveHeavyAggregation);
+        });*/
+        RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
+            AggregationPushdown aggregation_pushdown(binder, context, query_type);
+            aggregation_pushdown.RecordAggPushdown(plan_copy);
+            plan = aggregation_pushdown.ApplyAgg(std::move(plan));
+        });
+#ifdef PLAN_DEBUG
+        std::cout << "After Add Agg push down" << std::endl;
+        plan->Print();
+        // PrintOperatorBindings(plan.get());
+#endif // DEBUG
+        for (int i = 0; i < max_height; i++) {
             RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
                 RemoveUnusedColumns unused(binder, context, true);
                 unused.VisitOperator(*plan);
@@ -198,17 +226,9 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
                 plan = aggregation_pushdown.UpdateBinding(std::move(plan));
             });
         }
+
 #ifdef PLAN_DEBUG
-        std::cout << "After RemoveUnusedColumns " << std::endl;
-        plan->Print();
-        PrintOperatorBindings(plan.get());
-#endif // DEBUG
-        RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
-            AggregationPushdown aggregation_pushdown(binder, context, query_type);
-            plan = aggregation_pushdown.PruneAggregation(std::move(plan), &AggregationPushdown::RemoveHeavyAggregation);
-        });
-#ifdef PLAN_DEBUG
-        std::cout << "After RemoveHeavyAggregation" << std::endl;
+        std::cout << "After ApplyAgg!" << std::endl;
         plan->Print();
         PrintOperatorBindings(plan.get());
 #endif // DEBUG
@@ -291,7 +311,7 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 	}
 
 	// std::cout << "After All Optimizations Plan " << std::endl;
-	plan->Print();
+	// plan->Print();
 	// PrintOperatorBindings(plan.get());
 
 	// auto total_end = std::chrono::high_resolution_clock::now();
