@@ -103,6 +103,8 @@ public:
 
     void RecordAggPushdown(unique_ptr<LogicalOperator>& op);
 
+    unique_ptr<LogicalOperator> OptForUnion(unique_ptr<LogicalOperator> op);
+
     unique_ptr<LogicalOperator> RemoveHeavyAggregation(unique_ptr<LogicalOperator> op);
 
 private:

@@ -122,6 +122,7 @@ void RemoveUnusedColumns::VisitOperator(LogicalOperator &op) {
 				entries.push_back(i);
 			}
 			ClearUnusedExpressions(entries, setop.table_index);
+#ifndef YANPLUS
 			if (entries.size() < setop.column_count) {
 				if (entries.empty()) {
 					// no columns referenced: this happens in the case of a COUNT(*)
@@ -153,6 +154,7 @@ void RemoveUnusedColumns::VisitOperator(LogicalOperator &op) {
 				}
 				return;
 			}
+#endif // !YANPLUS
 		}
 		for (auto &child : op.children) {
 			RemoveUnusedColumns remove(binder, context, true);

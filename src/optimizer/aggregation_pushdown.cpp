@@ -80,7 +80,11 @@ unique_ptr<LogicalOperator> AggregationPushdown::ApplyAgg(unique_ptr<LogicalOper
 // Part2
 unique_ptr<LogicalOperator> AggregationPushdown::UpdateBinding(unique_ptr<LogicalOperator> op) {
     op = PruneAggregation(std::move(op), &AggregationPushdown::PruneAggregationWithProjectionMap);
+    // std::cout << "After PruneAggregationWithProjectionMap! " << std::endl;
+    // op->Print();
     op = UpdateAnnotMul(std::move(op));
+    // std::cout << "After UpdateAnnotMul! " << std::endl;
+    // op->Print();
     return op;
 }
 
@@ -266,7 +270,7 @@ unique_ptr<LogicalOperator> AggregationPushdown::ReplaceRootCountWithSum(unique_
 bool AggregationPushdown::CheckPKFK(LogicalOperator* op) {
     // TODO: Add filter_op check
     // Check if operator is LogicalGet
-    if (op->type != LogicalOperatorType::LOGICAL_GET) {
+    if (op->type != LogicalOperatorType::LOGICAL_GET || op->type != LogicalOperatorType::LOGICAL_UNION) {
         return false; // Not a direct table, can't determine PK status
     }
 
@@ -1281,8 +1285,6 @@ unique_ptr<LogicalOperator> AggregationPushdown::PruneAggregationWithProjectionM
     bool has_bottom_proj = (agg.children.size() == 1 && agg.children[0]->type == LogicalOperatorType::LOGICAL_PROJECTION);
     LogicalProjection* bottom_proj = has_bottom_proj ? &agg.children[0]->Cast<LogicalProjection>() : nullptr;
 
-    
-
     // Nothing to prune
     if (top_proj.GetColumnBindings().size() == agg.GetColumnBindings().size()) {
         return std::move(op);
@@ -1532,6 +1534,11 @@ void AggregationPushdown::RecordAggPushdown(unique_ptr<LogicalOperator>& op) {
         }
         join_pushdown_info.push_back({join_counter++, left, right});
     }
+}
+
+unique_ptr<LogicalOperator> AggregationPushdown::OptForUnion(unique_ptr<LogicalOperator> op) {
+// TODO:
+    return nullptr;
 }
 
 unique_ptr<LogicalOperator> AggregationPushdown::RemoveHeavyAggregation(unique_ptr<LogicalOperator> op) {
