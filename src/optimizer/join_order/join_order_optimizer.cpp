@@ -211,10 +211,14 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::CallSolveJoinOrderFixed(unique_p
 	
 			// Initialize the leaf/single node plans
 			plan_enumerator.InitLeafPlans();
-	
-			// Ask the plan enumerator to enumerate a number of join orders
-			auto final_plan = plan_enumerator.SolveJoinOrderFixed(exec_order);
-			// TODO: add in the check that if no plan exists, you have to add a cross product.
+
+			unique_ptr<JoinNode> final_plan;
+
+			if (exec_order.empty()) {
+				final_plan = plan_enumerator.SolveJoinOrder();
+			} else {
+				final_plan = plan_enumerator.SolveJoinOrderFixed(exec_order);
+			}
 	
 			// now reconstruct a logical plan from the query graph plan
 			new_logical_plan = query_graph_manager.Reconstruct(std::move(plan), *final_plan);

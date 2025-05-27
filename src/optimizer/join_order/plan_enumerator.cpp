@@ -917,8 +917,10 @@ bool PlanEnumerator::IsEar(RelationalHypergraph& graph, idx_t relation_idx, idx_
     
     // Find attributes unique to this relation
     unordered_set<idx_t> unique_attrs;
+    unordered_set<idx_t> shared_attrs;
+    
     for (auto vertex : relation) {
-        bool is_unique = true;
+        bool appears_elsewhere = false;
         
         // Check if this vertex appears in any other relation
         for (idx_t other_idx = 0; other_idx < graph.relations.size(); other_idx++) {
@@ -927,62 +929,72 @@ bool PlanEnumerator::IsEar(RelationalHypergraph& graph, idx_t relation_idx, idx_
             }
             
             if (graph.relations[other_idx].find(vertex) != graph.relations[other_idx].end()) {
-                is_unique = false;
+                appears_elsewhere = true;
+                shared_attrs.insert(vertex);
                 break;
             }
         }
         
-        if (is_unique) {
+        if (!appears_elsewhere) {
             unique_attrs.insert(vertex);
         }
     }
     
-    // If no unique attributes, not an ear
-    if (unique_attrs.empty()) {
-        return false;
-    }
-    
-    // Find shared attributes (all attributes minus unique ones)
-    unordered_set<idx_t> shared_attrs;
-    for (auto vertex : relation) {
-        if (unique_attrs.find(vertex) == unique_attrs.end()) {
-            shared_attrs.insert(vertex);
-        }
-    }
-    
-    // If no shared attributes, it's an ear with any other relation as witness
-    if (shared_attrs.empty()) {
-        // Find any other relation to be the witness
-        for (idx_t i = 0; i < graph.relations.size(); i++) {
-            if (i != relation_idx && !graph.relations[i].empty()) {
-                witness_idx = i;
+    // Case 1: Has unique attributes (original logic)
+    if (!unique_attrs.empty()) {
+        // Find a relation that contains all shared attributes
+        for (idx_t other_idx = 0; other_idx < graph.relations.size(); other_idx++) {
+            if (other_idx == relation_idx) continue;
+            
+            const auto& other_relation = graph.relations[other_idx];
+            bool contains_all_shared = true;
+            
+            for (auto shared_attr : shared_attrs) {
+                if (other_relation.find(shared_attr) == other_relation.end()) {
+                    contains_all_shared = false;
+                    break;
+                }
+            }
+            
+            if (contains_all_shared) {
+                witness_idx = other_idx;
                 return true;
             }
         }
-        // If no other relations exist, this is the only relation - technically an ear
-        return true;
+        
+        // If no shared attributes, any other relation can be witness
+		if (shared_attrs.empty()) {
+        	if (graph.relations.size() == 1) {
+            	// This is the last relation - it's the root
+				witness_idx = relation_idx;
+	            return true;
+    	    } else {
+        	    throw InternalException("No shared attributes for this relation and not the root node! ");
+        	}
+    	}
     }
     
-    // Check if all shared attributes are contained in a single other relation (witness)
-    for (idx_t other_idx = 0; other_idx < graph.relations.size(); other_idx++) {
-        if (other_idx == relation_idx) {
-            continue;
-        }
-        
-        const auto& other_relation = graph.relations[other_idx];
-        bool contains_all_shared = true;
-        
-        for (auto shared_attr : shared_attrs) {
-            if (other_relation.find(shared_attr) == other_relation.end()) {
-                contains_all_shared = false;
-                break;
+    // Case 2: All attributes are contained in a single other relation (your fix)
+    if (unique_attrs.empty() && !shared_attrs.empty()) {
+        // Check if ALL attributes of this relation are contained in a single other relation
+        for (idx_t other_idx = 0; other_idx < graph.relations.size(); other_idx++) {
+            if (other_idx == relation_idx) continue;
+            
+            const auto& other_relation = graph.relations[other_idx];
+            bool contains_all_attributes = true;
+            
+            // Check if other_relation contains ALL attributes of our relation
+            for (auto attr : relation) {
+                if (other_relation.find(attr) == other_relation.end()) {
+                    contains_all_attributes = false;
+                    break;
+                }
             }
-        }
-        
-        if (contains_all_shared) {
-            // Found a witness!
-            witness_idx = other_idx;
-            return true;
+            
+            if (contains_all_attributes) {
+                witness_idx = other_idx;
+                return true;
+            }
         }
     }
     
@@ -1007,7 +1019,8 @@ bool PlanEnumerator::RunGYOAlgorithm() {
         progress_made = false;
         
         for (idx_t i = 0; i < graph.relations.size(); i++) {
-            idx_t witness_idx = 0;
+            idx_t witness_idx = -1;
+			// TODO: Add cost / output priority selection here
             if (IsEar(graph, i, witness_idx)) {
                 // Record this reduction step
                 GYOReductionStep step;
@@ -1016,33 +1029,12 @@ bool PlanEnumerator::RunGYOAlgorithm() {
                 if (i != witness_idx && witness_idx < graph.relation_indices.size()) {
                     step.witness_relation_idx = graph.relation_indices[witness_idx];
                 } else {
-                    // If there's no proper witness, use the ear itself
                     step.witness_relation_idx = graph.relation_indices[i];
                 }
                 
                 gyo_reduction_sequence.push_back(step);
-                
-                // Remove this relation's unique vertices from the graph
-                unordered_set<idx_t> unique_vertices;
-                for (auto vertex : graph.relations[i]) {
-                    bool is_unique = true;
-                    for (idx_t j = 0; j < graph.relations.size(); j++) {
-                        if (j == i) continue;
-                        if (graph.relations[j].find(vertex) != graph.relations[j].end()) {
-                            is_unique = false;
-                            break;
-                        }
-                    }
-                    if (is_unique) {
-                        unique_vertices.insert(vertex);
-                    }
-                }
-                
-      
-                
                 graph.relations.erase(graph.relations.begin() + i);
-                    graph.relation_indices.erase(graph.relation_indices.begin() + i);
-                
+                graph.relation_indices.erase(graph.relation_indices.begin() + i);
                 progress_made = true;
                 break;
             }
@@ -1058,12 +1050,15 @@ unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderGYO() {
     if (gyo_reduction_sequence.empty()) {
         if (!RunGYOAlgorithm()) {
             // Query is cyclic, can't use GYO
+			std::cout << "Query is cyclic, falling back to default join order solver." << std::endl;
             return nullptr;
         }
     }
     
     // Map for tracking relation sets to their corresponding join nodes
     unordered_map<JoinRelationSet*, unique_ptr<JoinNode>> join_map;
+	// Track which current relation set each original relation belongs to
+    unordered_map<idx_t, JoinRelationSet*> relation_to_current_set;
     
     // First create a leaf node for each base relation
     for (idx_t i = 0; i < query_graph_manager.relation_manager.NumRelations(); i++) {
@@ -1075,55 +1070,51 @@ unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderGYO() {
         node->cardinality = relation_stats[i].cardinality;
         
         join_map[&relation_set] = std::move(node);
+		relation_to_current_set[i] = &relation_set;
     }
     
     // Process the reduction sequence in the original order (bottom-up)
     for (auto& step : gyo_reduction_sequence) {
-        // Skip if ear and witness are the same (single relation)
         if (step.ear_relation_idx == step.witness_relation_idx) {
-            continue;
-        }
-        
-        // Get the relation sets
-        auto& ear_set = query_graph_manager.set_manager.GetJoinRelation(step.ear_relation_idx);
-        auto& witness_set = query_graph_manager.set_manager.GetJoinRelation(step.witness_relation_idx);
+			// If ear and witness are the same, we can skip this step, normally, this is the last node
+			continue;
+		}
+		
+        auto* ear_current_set = relation_to_current_set[step.ear_relation_idx];
+        auto* witness_current_set = relation_to_current_set[step.witness_relation_idx];
         
         // Get connections between these relations - similar to the plan enumerator
-        auto connections = query_graph.GetConnections(ear_set, witness_set);
-        
-        // Create the union relation set
-        auto& union_set = query_graph_manager.set_manager.Union(ear_set, witness_set);
+        auto connections = query_graph.GetConnections(*ear_current_set, *witness_current_set);
         
         // Get the existing plans for both relation sets
-        auto ear_plan = join_map.find(&ear_set);
-        auto witness_plan = join_map.find(&witness_set);
+        auto ear_plan = join_map.find(ear_current_set);
+        auto witness_plan = join_map.find(witness_current_set);
         
         D_ASSERT(ear_plan != join_map.end());
         D_ASSERT(witness_plan != join_map.end());
         
         if (!connections.empty()) {
+			// Create the union relation set
+        	auto& union_set = query_graph_manager.set_manager.Union(*ear_current_set, *witness_current_set);
             // We have connections, use them directly
             auto join_node = CreateJoinTree(union_set, connections, *ear_plan->second, *witness_plan->second);
 			join_map[&union_set] = std::move(join_node);
+			// UPDATE: All relations that were in ear_set or witness_set now belong to union_set
+            for (auto& [rel_idx, current_set_ptr] : relation_to_current_set) {
+                if (current_set_ptr == ear_current_set || current_set_ptr == witness_current_set) {
+                    relation_to_current_set[rel_idx] = &union_set;
+                }
+            }
+			// Remove old plans from the map (they're now part of the union)
+            // join_map.erase(ear_current_set);
+            // join_map.erase(witness_current_set);
         } else {
 			throw Exception("No connections found between ear and witness relation sets.");
 		}
     }
     
-    // Find the node with maximum relations as the root
-    JoinRelationSet* root_set = nullptr;
-    size_t max_relations = 0;
-    
-    for (auto& entry : join_map) {
-        if (entry.first->count > max_relations) {
-            max_relations = entry.first->count;
-            root_set = entry.first;
-        }
-    }
-    
-    // Return the root join node
-    if (root_set) {
-        return std::move(join_map[root_set]);
+    if (join_map.size() == 1) {
+        return std::move(join_map.begin()->second);
     }
     
     return nullptr;

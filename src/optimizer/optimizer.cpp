@@ -120,14 +120,19 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		plan = deliminator.Optimize(std::move(plan));
 	});
 
+#ifdef PLAN_DEBUG
+		std::cout << "Before First Join Order Plan " << std::endl;
+		plan->Print();
+#endif // DEBUG
 	// then we perform the join ordering optimization
 	// this also rewrites cross products + filters into joins and performs filter pushdowns
 	// auto start2 = std::chrono::high_resolution_clock::now();
-    bool GYO = false;
+    bool GYO = true;
 
 	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
 		JoinOrderOptimizer optimizer(context, GYO);
-		plan = optimizer.Optimize(std::move(plan));
+        vector<LogicalOperator*> empty_bf_order;
+        plan = optimizer.CallSolveJoinOrderFixed(std::move(plan), empty_bf_order);
 #ifdef PLAN_DEBUG
 		std::cout << "After First Join Order Plan " << std::endl;
 		plan->Print();
@@ -221,14 +226,10 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
                 RemoveUnusedColumns unused(binder, context, true);
                 unused.VisitOperator(*plan);
             });
-            // std::cout << "Pass " << i + 1 << " of " << max_height << std::endl;
-            // plan->Print();
             RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
                 AggregationPushdown aggregation_pushdown(binder, context, query_type);
                 plan = aggregation_pushdown.UpdateBinding(std::move(plan));
             });
-            // std::cout << "After Agg Update Binding " << std::endl;
-            // plan->Print();
         }
 
 #ifdef PLAN_DEBUG
