@@ -194,6 +194,8 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::CallSolveJoinOrderFixed(unique_p
 		auto gyo_join_tree = plan_enumerator.SolveJoinOrderGYO();
 		if (gyo_join_tree) {
 			new_logical_plan = query_graph_manager.Reconstruct(std::move(plan), *gyo_join_tree);
+			std::cout << "GYO join tree found and reconstructed." << std::endl;
+			new_logical_plan->Print();
 		} else {
 			// Unable to handle with GYO
 			GYO = false;
@@ -201,6 +203,7 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::CallSolveJoinOrderFixed(unique_p
 	}
 
 	if (!GYO) {
+		std::cout << "GYO join tree not found! " << std::endl;
 		if (reorderable) {
 			// query graph now has filters and relations
 			auto cost_model = CostModel(query_graph_manager);

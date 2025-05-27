@@ -1054,11 +1054,11 @@ unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderGYO() {
             return nullptr;
         }
     }
-    
-    // Map for tracking relation sets to their corresponding join nodes
-    unordered_map<JoinRelationSet*, unique_ptr<JoinNode>> join_map;
 	// Track which current relation set each original relation belongs to
     unordered_map<idx_t, JoinRelationSet*> relation_to_current_set;
+
+	JoinRelationSet* final_set = nullptr;
+	idx_t total_relations = query_graph_manager.relation_manager.NumRelations();
     
     // First create a leaf node for each base relation
     for (idx_t i = 0; i < query_graph_manager.relation_manager.NumRelations(); i++) {
@@ -1069,7 +1069,7 @@ unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderGYO() {
 		// FIXME: Check stats here?
         node->cardinality = relation_stats[i].cardinality;
         
-        join_map[&relation_set] = std::move(node);
+        plans[relation_set] = std::move(node);
 		relation_to_current_set[i] = &relation_set;
     }
     
@@ -1087,35 +1087,39 @@ unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderGYO() {
         auto connections = query_graph.GetConnections(*ear_current_set, *witness_current_set);
         
         // Get the existing plans for both relation sets
-        auto ear_plan = join_map.find(ear_current_set);
-        auto witness_plan = join_map.find(witness_current_set);
+        auto ear_plan = plans.find(*ear_current_set);
+        auto witness_plan = plans.find(*witness_current_set);
         
-        D_ASSERT(ear_plan != join_map.end());
-        D_ASSERT(witness_plan != join_map.end());
+        D_ASSERT(ear_plan != plans.end());
+        D_ASSERT(witness_plan != plans.end());
         
         if (!connections.empty()) {
 			// Create the union relation set
         	auto& union_set = query_graph_manager.set_manager.Union(*ear_current_set, *witness_current_set);
             // We have connections, use them directly
             auto join_node = CreateJoinTree(union_set, connections, *ear_plan->second, *witness_plan->second);
-			join_map[&union_set] = std::move(join_node);
+			plans[union_set] = std::move(join_node);
 			// UPDATE: All relations that were in ear_set or witness_set now belong to union_set
             for (auto& [rel_idx, current_set_ptr] : relation_to_current_set) {
                 if (current_set_ptr == ear_current_set || current_set_ptr == witness_current_set) {
                     relation_to_current_set[rel_idx] = &union_set;
                 }
             }
-			// Remove old plans from the map (they're now part of the union)
-            // join_map.erase(ear_current_set);
-            // join_map.erase(witness_current_set);
+			if (union_set.count == total_relations) {
+				final_set = &union_set;
+			}
         } else {
 			throw Exception("No connections found between ear and witness relation sets.");
 		}
     }
     
-    if (join_map.size() == 1) {
-        return std::move(join_map.begin()->second);
-    }
+    if (final_set) {
+		// If we have a final set that contains all relations, return its plan
+		auto final_plan = plans.find(*final_set);
+		if (final_plan != plans.end()) {
+			return std::move(final_plan->second);
+		}
+	}
     
     return nullptr;
 }

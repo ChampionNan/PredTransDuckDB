@@ -176,13 +176,11 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 	});
 
 #ifdef YANPLUS // NOTE: Optimiztion for aggregation
-    // Flag for add aggregation pushdown
-
 	if (query_type == QueryType::COUNT_STAR || query_type == QueryType::MINMAX_AGGREGATE) {
-#ifdef PLAN_DEBUG
         unique_ptr<LogicalOperator> plan_copy = plan->Copy(context);
-		std::cout << "Before AGGREGATION_PUSHDOWN Plan " << std::endl;
-		plan_copy->Print();
+#ifdef PLAN_DEBUG
+		// std::cout << "Before AGGREGATION_PUSHDOWN Plan " << std::endl;
+		// plan_copy->Print();
 		// PrintOperatorBindings(plan.get());
 #endif
 		RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
@@ -217,8 +215,8 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
             plan = aggregation_pushdown.ApplyAgg(std::move(plan));
         });
 #ifdef PLAN_DEBUG
-        std::cout << "Before apply agg" << std::endl;
-        plan->Print();
+        // std::cout << "Before apply agg" << std::endl;
+        // plan->Print();
         // PrintOperatorBindings(plan.get());
 #endif // DEBUG
         for (int i = 0; i < max_height; i++) {
@@ -233,9 +231,9 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
         }
 
 #ifdef PLAN_DEBUG
-        std::cout << "After ApplyAgg!" << std::endl;
-        plan->Print();
-        PrintOperatorBindings(plan.get());
+        // std::cout << "After ApplyAgg!" << std::endl;
+        // plan->Print();
+        // PrintOperatorBindings(plan.get());
 #endif // DEBUG
 	}
 #endif
