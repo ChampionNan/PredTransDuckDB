@@ -127,12 +127,22 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 	// then we perform the join ordering optimization
 	// this also rewrites cross products + filters into joins and performs filter pushdowns
 	// auto start2 = std::chrono::high_resolution_clock::now();
+#ifdef YANPLUS
     bool GYO = true;
+#endif // YANPLUS
+
+#ifndef YANPLUS
+    bool GYO = false;
+#endif // !YANPLUS
 
 	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
 		JoinOrderOptimizer optimizer(context, GYO);
-        vector<LogicalOperator*> empty_bf_order;
-        plan = optimizer.CallSolveJoinOrderFixed(std::move(plan), empty_bf_order);
+        if (GYO) {
+            vector<LogicalOperator*> empty_bf_order;
+            plan = optimizer.CallSolveJoinOrderFixed(std::move(plan), empty_bf_order);
+        } else {
+            plan = optimizer.Optimize(std::move(plan));
+        }
 #ifdef PLAN_DEBUG
 		std::cout << "After First Join Order Plan " << std::endl;
 		plan->Print();
@@ -215,8 +225,8 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
             plan = aggregation_pushdown.ApplyAgg(std::move(plan));
         });
 #ifdef PLAN_DEBUG
-        // std::cout << "Before apply agg" << std::endl;
-        // plan->Print();
+        std::cout << "Before apply agg" << std::endl;
+        plan->Print();
         // PrintOperatorBindings(plan.get());
 #endif // DEBUG
         for (int i = 0; i < max_height; i++) {
@@ -231,8 +241,8 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
         }
 
 #ifdef PLAN_DEBUG
-        // std::cout << "After ApplyAgg!" << std::endl;
-        // plan->Print();
+        std::cout << "After ApplyAgg!" << std::endl;
+        plan->Print();
         // PrintOperatorBindings(plan.get());
 #endif // DEBUG
 	}
