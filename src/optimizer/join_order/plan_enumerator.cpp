@@ -834,7 +834,7 @@ RelationalHypergraph PlanEnumerator::BuildRelationalHypergraph() {
     idx_t next_vertex_id = 0;
     
     // Map to track join equivalence classes
-    unordered_map<ColumnBinding, unordered_set<ColumnBinding, ColumnBindingHash>, ColumnBindingHash> equivalence_classes;
+    column_binding_map_t<column_binding_set_t> equivalence_classes;
     
     // First pass: identify join equivalence classes
     for (auto& filter_info : query_graph_manager.GetFilterBindings()) {
@@ -874,7 +874,7 @@ RelationalHypergraph PlanEnumerator::BuildRelationalHypergraph() {
     } while (changes_made);
     
     // Assign the same vertex ID to all members of each equivalence class
-    unordered_map<ColumnBinding, idx_t, ColumnBindingHash> binding_to_vertex;
+    column_binding_map_t<idx_t> binding_to_vertex;
     for (auto& [binding, equiv_set] : equivalence_classes) {
         if (binding_to_vertex.find(binding) == binding_to_vertex.end()) {
             // Assign a new vertex ID to this entire equivalence class
@@ -1001,7 +1001,7 @@ bool PlanEnumerator::IsEar(RelationalHypergraph& graph, idx_t relation_idx, idx_
     return false;
 }
 
-bool PlanEnumerator::RunGYOAlgorithm() {
+unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderGYO() {
     // Build the relational hypergraph
     auto graph = BuildRelationalHypergraph();
     
@@ -1010,116 +1010,138 @@ bool PlanEnumerator::RunGYOAlgorithm() {
     
     // No relations or trivial case
     if (graph.relations.size() <= 1) {
-        return true;
+        return nullptr;
     }
     
-    // Perform GYO reduction
+    // Track which current relation set each original relation belongs to
+    unordered_map<idx_t, JoinRelationSet*> relation_to_current_set;
+    
+    // Initialize leaf plans
+    auto relation_stats = query_graph_manager.relation_manager.GetRelationStats();
+    for (idx_t i = 0; i < query_graph_manager.relation_manager.NumRelations(); i++) {
+        auto& relation_set = query_graph_manager.set_manager.GetJoinRelation(i);
+        auto node = make_uniq<JoinNode>(relation_set);
+        node->cardinality = relation_stats[i].cardinality;
+        plans[relation_set] = std::move(node);
+        relation_to_current_set[i] = &relation_set;
+    }
+    
+    JoinRelationSet* final_set = nullptr;
+    idx_t total_relations = query_graph_manager.relation_manager.NumRelations();
+    
+    // Perform GYO reduction with cost-based optimization
     bool progress_made = true;
     while (progress_made && !graph.relations.empty()) {
         progress_made = false;
         
+        // Structure to store all valid ear candidates with their costs
+        struct EarCandidate {
+            idx_t ear_idx;
+            idx_t witness_idx;
+            double cost;
+            unique_ptr<JoinNode> join_node;
+            JoinRelationSet* union_set;
+        };
+        
+        vector<EarCandidate> ear_candidates;
+        
+        // Find all possible ears and calculate their costs
         for (idx_t i = 0; i < graph.relations.size(); i++) {
             idx_t witness_idx = -1;
-			// TODO: Add cost / output priority selection here
+            
             if (IsEar(graph, i, witness_idx)) {
-                // Record this reduction step
-                GYOReductionStep step;
-                step.ear_relation_idx = graph.relation_indices[i];
+                idx_t ear_relation_idx = graph.relation_indices[i];
+                idx_t witness_relation_idx = graph.relation_indices[witness_idx];
+
+				if (ear_relation_idx == witness_relation_idx) {
+					// If ear and witness are the same, we can skip this step, normally, this is the last node
+					continue;
+				}
                 
-                if (i != witness_idx && witness_idx < graph.relation_indices.size()) {
-                    step.witness_relation_idx = graph.relation_indices[witness_idx];
-                } else {
-                    step.witness_relation_idx = graph.relation_indices[i];
+                auto* ear_current_set = relation_to_current_set[ear_relation_idx];
+                auto* witness_current_set = relation_to_current_set[witness_relation_idx];
+                
+                // Get connections between these relations
+                auto connections = query_graph.GetConnections(*ear_current_set, *witness_current_set);
+                
+                if (!connections.empty()) {
+                    // Get the existing plans for both relation sets
+                    auto ear_plan = plans.find(*ear_current_set);
+                    auto witness_plan = plans.find(*witness_current_set);
+                    
+                    D_ASSERT(ear_plan != plans.end());
+                    D_ASSERT(witness_plan != plans.end());
+                    
+                    // Create the union relation set
+                    auto& union_set = query_graph_manager.set_manager.Union(*ear_current_set, *witness_current_set);
+                    
+                    // Calculate cost using CreateJoinTree
+                    auto join_node = CreateJoinTree(union_set, connections, *ear_plan->second, *witness_plan->second);
+                    double cost = join_node->cost;
+                    
+                    // Store this candidate
+                    EarCandidate candidate;
+                    candidate.ear_idx = i;
+                    candidate.witness_idx = witness_idx;
+                    candidate.cost = cost;
+                    candidate.join_node = std::move(join_node);
+                    candidate.union_set = &union_set;
+                    
+                    ear_candidates.push_back(std::move(candidate));
                 }
-                
-                gyo_reduction_sequence.push_back(step);
-                graph.relations.erase(graph.relations.begin() + i);
-                graph.relation_indices.erase(graph.relation_indices.begin() + i);
-                progress_made = true;
-                break;
             }
         }
-    }
-    
-    // If the graph is empty, the query is acyclic
-    return graph.relations.empty();
-}
-
-unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderGYO() {
-    // First run the GYO algorithm if not already done
-    if (gyo_reduction_sequence.empty()) {
-        if (!RunGYOAlgorithm()) {
-            // Query is cyclic, can't use GYO
-			std::cout << "Query is cyclic, falling back to default join order solver." << std::endl;
-            return nullptr;
-        }
-    }
-	// Track which current relation set each original relation belongs to
-    unordered_map<idx_t, JoinRelationSet*> relation_to_current_set;
-
-	JoinRelationSet* final_set = nullptr;
-	idx_t total_relations = query_graph_manager.relation_manager.NumRelations();
-    
-    // First create a leaf node for each base relation
-    for (idx_t i = 0; i < query_graph_manager.relation_manager.NumRelations(); i++) {
-        auto& relation_set = query_graph_manager.set_manager.GetJoinRelation(i);
-        auto relation_stats = query_graph_manager.relation_manager.GetRelationStats();
         
-        auto node = make_uniq<JoinNode>(relation_set);
-		// FIXME: Check stats here?
-        node->cardinality = relation_stats[i].cardinality;
-        
-        plans[relation_set] = std::move(node);
-		relation_to_current_set[i] = &relation_set;
-    }
-    
-    // Process the reduction sequence in the original order (bottom-up)
-    for (auto& step : gyo_reduction_sequence) {
-        if (step.ear_relation_idx == step.witness_relation_idx) {
-			// If ear and witness are the same, we can skip this step, normally, this is the last node
-			continue;
-		}
-		
-        auto* ear_current_set = relation_to_current_set[step.ear_relation_idx];
-        auto* witness_current_set = relation_to_current_set[step.witness_relation_idx];
-        
-        // Get connections between these relations - similar to the plan enumerator
-        auto connections = query_graph.GetConnections(*ear_current_set, *witness_current_set);
-        
-        // Get the existing plans for both relation sets
-        auto ear_plan = plans.find(*ear_current_set);
-        auto witness_plan = plans.find(*witness_current_set);
-        
-        D_ASSERT(ear_plan != plans.end());
-        D_ASSERT(witness_plan != plans.end());
-        
-        if (!connections.empty()) {
-			// Create the union relation set
-        	auto& union_set = query_graph_manager.set_manager.Union(*ear_current_set, *witness_current_set);
-            // We have connections, use them directly
-            auto join_node = CreateJoinTree(union_set, connections, *ear_plan->second, *witness_plan->second);
-			plans[union_set] = std::move(join_node);
-			// UPDATE: All relations that were in ear_set or witness_set now belong to union_set
+        // Select the ear candidate with minimum cost
+        if (!ear_candidates.empty()) {
+            auto best_candidate = std::min_element(ear_candidates.begin(), ear_candidates.end(),
+                [](const EarCandidate& a, const EarCandidate& b) {
+                    return a.cost < b.cost;
+                });
+            
+            // Apply the best reduction step
+            idx_t ear_relation_idx = graph.relation_indices[best_candidate->ear_idx];
+            idx_t witness_relation_idx = graph.relation_indices[best_candidate->witness_idx];
+            
+            // Record this reduction step
+            GYOReductionStep step;
+            step.ear_relation_idx = ear_relation_idx;
+            step.witness_relation_idx = witness_relation_idx;
+            gyo_reduction_sequence.push_back(step);
+            
+            // Update plans with the best join node
+            plans[*best_candidate->union_set] = std::move(best_candidate->join_node);
+            
+            // Update relation mappings - all relations that were in ear_set or witness_set now belong to union_set
+            auto* ear_current_set = relation_to_current_set[ear_relation_idx];
+            auto* witness_current_set = relation_to_current_set[witness_relation_idx];
+            
             for (auto& [rel_idx, current_set_ptr] : relation_to_current_set) {
                 if (current_set_ptr == ear_current_set || current_set_ptr == witness_current_set) {
-                    relation_to_current_set[rel_idx] = &union_set;
+                    relation_to_current_set[rel_idx] = best_candidate->union_set;
                 }
             }
-			if (union_set.count == total_relations) {
-				final_set = &union_set;
-			}
-        } else {
-			throw Exception("No connections found between ear and witness relation sets.");
-		}
+            
+            // Check if this is the final set
+            if (best_candidate->union_set->count == total_relations) {
+                final_set = best_candidate->union_set;
+            }
+            
+            // Remove the ear from the graph
+            graph.relations.erase(graph.relations.begin() + best_candidate->ear_idx);
+            graph.relation_indices.erase(graph.relation_indices.begin() + best_candidate->ear_idx);
+            
+            progress_made = true;
+        }
     }
-    
+
+    // Return the final plan if available
     if (final_set) {
-		// If we have a final set that contains all relations, return its plan
-		auto final_plan = plans.find(*final_set);
-		if (final_plan != plans.end()) {
-			return std::move(final_plan->second);
-		}
-	}
+        auto final_plan = plans.find(*final_set);
+        if (final_plan != plans.end()) {
+            return std::move(final_plan->second);
+        }
+    }
     
     return nullptr;
 }

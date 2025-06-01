@@ -26,6 +26,7 @@
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/planner/column_binding.hpp"
+#include "duckdb/planner/column_binding_map.hpp"
 
 #include <functional>
 
@@ -46,7 +47,7 @@ struct ColumnBindingHash {
 // Relational hypergraph for GYO algorithm
 struct RelationalHypergraph {
 	// Maps column bindings to unique vertex IDs
-	unordered_map<ColumnBinding, idx_t, ColumnBindingHash> column_to_vertex;
+	column_binding_map_t<idx_t> column_to_vertex;
 	// Maps vertex IDs back to column bindings
 	vector<ColumnBinding> vertex_to_column;
 	// Each relation (hyperedge) is a set of vertices
@@ -120,7 +121,6 @@ private:
 
 // GYO algorithm implementation
 public:
-    bool RunGYOAlgorithm();
     unique_ptr<JoinNode> SolveJoinOrderGYO();
 private:
     // Reduction sequence for reconstructing the join tree
