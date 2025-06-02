@@ -3,6 +3,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/optimizer/join_order/join_node.hpp"
 #include "duckdb/optimizer/join_order/query_graph_manager.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 
 #include <random>
 #include <cmath>
@@ -829,9 +830,25 @@ unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderFixed(vector<LogicalOperator*
 	return nullptr;
 }
 
+void PlanEnumerator::GetOutputVariables() {
+    auto logical_plan = root_op;
+    if (logical_plan && logical_plan->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+        // Directly access expressions from LogicalOperator base class
+        for (auto& expression : logical_plan->expressions) {
+            if (expression->type == ExpressionType::BOUND_COLUMN_REF) {
+                auto col_ref = reinterpret_cast<BoundColumnRefExpression*>(expression.get());
+                output_variables.insert(col_ref->binding);
+            }
+			// TODO: Other types, and should record the root child node attrs
+        }
+    }
+}
+
 RelationalHypergraph PlanEnumerator::BuildRelationalHypergraph() {
     RelationalHypergraph graph;
     idx_t next_vertex_id = 0;
+
+	GetOutputVariables();
     
     // Map to track join equivalence classes
     column_binding_map_t<column_binding_set_t> equivalence_classes;
@@ -879,10 +896,16 @@ RelationalHypergraph PlanEnumerator::BuildRelationalHypergraph() {
         if (binding_to_vertex.find(binding) == binding_to_vertex.end()) {
             // Assign a new vertex ID to this entire equivalence class
             idx_t vertex_id = next_vertex_id++;
+			bool is_output_vertex = false;
             for (auto& equiv_binding : equiv_set) {
                 binding_to_vertex[equiv_binding] = vertex_id;
+				if (output_variables.find(equiv_binding) != output_variables.end()) {
+					is_output_vertex = true;
+				}
             }
-            
+			if (is_output_vertex) {
+                graph.output_vertices.insert(vertex_id);
+            }
             // Only store one representative column binding for this vertex
             graph.vertex_to_column.push_back(binding);
         }
@@ -1038,6 +1061,7 @@ unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderGYO() {
         struct EarCandidate {
             idx_t ear_idx;
             idx_t witness_idx;
+			idx_t output_variables_number; 
             double cost;
             unique_ptr<JoinNode> join_node;
             JoinRelationSet* union_set;
@@ -1078,11 +1102,23 @@ unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderGYO() {
                     // Calculate cost using CreateJoinTree
                     auto join_node = CreateJoinTree(union_set, connections, *ear_plan->second, *witness_plan->second);
                     double cost = join_node->cost;
+
+					idx_t output_vars_number = 0;
+                    const auto& ear_relation = graph.relations[i];
+
+					if (graph.output_vertices.size() > 0) {
+						for (auto vertex : ear_relation) {
+                            if (graph.output_vertices.find(vertex) != graph.output_vertices.end()) {
+                                output_vars_number += 1;
+                            }
+                        }
+					}
                     
                     // Store this candidate
                     EarCandidate candidate;
                     candidate.ear_idx = i;
                     candidate.witness_idx = witness_idx;
+					candidate.output_variables_number = output_vars_number;
                     candidate.cost = cost;
                     candidate.join_node = std::move(join_node);
                     candidate.union_set = &union_set;
@@ -1096,7 +1132,10 @@ unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderGYO() {
         if (!ear_candidates.empty()) {
             auto best_candidate = std::min_element(ear_candidates.begin(), ear_candidates.end(),
                 [](const EarCandidate& a, const EarCandidate& b) {
-                    return a.cost < b.cost;
+                    if (a.output_variables_number != b.output_variables_number) {
+						return a.output_variables_number < b.output_variables_number; // Prefer candidates with output variables
+					}
+					return a.cost < b.cost; // Otherwise, choose the one with lower cost
                 });
             
             // Apply the best reduction step

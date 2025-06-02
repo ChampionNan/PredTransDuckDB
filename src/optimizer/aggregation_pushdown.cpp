@@ -72,6 +72,9 @@ unique_ptr<LogicalOperator> AggregationPushdown::Rewrite(unique_ptr<LogicalOpera
 unique_ptr<LogicalOperator> AggregationPushdown::ApplyAgg(unique_ptr<LogicalOperator> op) {
     global_binding_map.clear();
     minmax_columns.clear();
+    if (query_type == QueryType::MINMAX_AGGREGATE) {
+        StoreMinMaxAggregates(op->children[0].get());
+    }
     op = AddAnnotAttributeDFS(std::move(op), true);
     op = ReplaceRootCountWithSum(std::move(op));
     return op;

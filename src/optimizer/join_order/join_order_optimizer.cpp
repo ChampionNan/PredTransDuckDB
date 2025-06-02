@@ -173,6 +173,7 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::CallSolveJoinOrderFixed(unique_p
 		auto cost_model = CostModel(query_graph_manager);
 		// Initialize a plan enumerator.
 		auto plan_enumerator = PlanEnumerator(query_graph_manager, cost_model, query_graph_manager.GetQueryGraphEdges());
+		plan_enumerator.root_op = op;
 		
 		auto gyo_join_tree = plan_enumerator.SolveJoinOrderGYO();
 		if (gyo_join_tree) {

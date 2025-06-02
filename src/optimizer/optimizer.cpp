@@ -227,7 +227,7 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 #ifdef PLAN_DEBUG
         std::cout << "Before apply agg" << std::endl;
         plan->Print();
-        // PrintOperatorBindings(plan.get());
+        PrintOperatorBindings(plan.get());
 #endif // DEBUG
         for (int i = 0; i < max_height; i++) {
             RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
@@ -239,11 +239,11 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
                 plan = aggregation_pushdown.UpdateBinding(std::move(plan));
             });
         }
-
+        
 #ifdef PLAN_DEBUG
         std::cout << "After ApplyAgg!" << std::endl;
         plan->Print();
-        // PrintOperatorBindings(plan.get());
+        PrintOperatorBindings(plan.get());
 #endif // DEBUG
 	}
 #endif

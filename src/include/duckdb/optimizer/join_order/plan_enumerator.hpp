@@ -54,6 +54,8 @@ struct RelationalHypergraph {
 	vector<unordered_set<idx_t>> relations;
 	// Original relation index for each hyperedge
 	vector<idx_t> relation_indices;
+
+	unordered_set<idx_t> output_vertices;
 };
 
 class PlanEnumerator {
@@ -119,20 +121,24 @@ private:
 	void UpdateJoinNodesInFullPlan(JoinNode &node);
 	bool NodeInFullPlan(JoinNode &node);
 
+
 // GYO algorithm implementation
 public:
+	LogicalOperator *root_op = nullptr;
+
     unique_ptr<JoinNode> SolveJoinOrderGYO();
+	void GetOutputVariables();
+	bool IsEar(RelationalHypergraph& graph, idx_t relation_idx, idx_t& witness_idx);
+	RelationalHypergraph BuildRelationalHypergraph();
+
 private:
     // Reduction sequence for reconstructing the join tree
     struct GYOReductionStep {
         idx_t ear_relation_idx;      // Index of the relation being reduced
         idx_t witness_relation_idx;  // Index of the witness relation
     };
-    // Build the relational hypergraph from DuckDB's structures
-    RelationalHypergraph BuildRelationalHypergraph();
-    // Check if a relation forms an ear according to GYO algorithm
-    bool IsEar(RelationalHypergraph& graph, idx_t relation_idx, idx_t& witness_idx);
     vector<GYOReductionStep> gyo_reduction_sequence;
+	column_binding_set_t output_variables;
 };
 
 } // namespace duckdb
