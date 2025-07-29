@@ -63,6 +63,7 @@ do
     then
         filename="${file%.*}"
         LOG_FILE="${INPUT_DIR_PATH}/log_${filename}_${DUCK_NUM}.txt"
+        TIME_FILE="${INPUT_DIR_PATH}/time_${filename}_${DUCK_NUM}.txt"
         rm -f $LOG_FILE
         touch $LOG_FILE
         QUERY="${INPUT_DIR_PATH}/${file}"
@@ -77,9 +78,9 @@ do
         for ((current_task=1; current_task<=5; current_task++)); 
         do
             echo "Current Task: ${current_task}"
-            timeout -s SIGKILL 1m ${DUCKDB_BIN} -c ".open ${DATABASE}_db" -c "SET threads TO ${NUM_THREADS};" -c ".timer off" -c ".read ${SUBMIT_QUERY}" -c ".timer on" -c ".read ${SUBMIT_QUERY}" | tail -n 1 | awk '{print $1}' >> $LOG_FILE
+            timeout -s SIGKILL 5m ${DUCKDB_BIN} -c ".open ${DATABASE}_db" -c "SET threads TO ${NUM_THREADS};" -c ".timer off" -c ".read ${SUBMIT_QUERY}" -c ".timer on" -c ".read ${SUBMIT_QUERY}" 2>&1 | tee -a "${LOG_FILE}" | tail -n 1 | awk '{print $1}' >> "${TIME_FILE}"
         done
-        awk '{s+=$1} END{if(NR) print "AVG", s/NR}' "$LOG_FILE" >> "$LOG_FILE"
+        awk '{s+=$1} END{if(NR) print "AVG", s/NR}' "$TIME_FILE" >> "$TIME_FILE"
         echo "End DuckDB Task..."
         rm -f "${SUBMIT_QUERY}"
     fi
