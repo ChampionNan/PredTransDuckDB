@@ -1,0 +1,5 @@
+SELECT count(*)
+FROM Message_hasTag_Tag_T, Message_hasCreator_Person_T, Comment_replyOf_Message_T, Person_likes_Message_T
+WHERE Message_hasTag_Tag_T.MessageId = Message_hasCreator_Person_T.MessageId
+	AND Comment_replyOf_Message_T.ParentMessageId = Message_hasTag_Tag_T.MessageId
+	AND Person_likes_Message_T.MessageId = Message_hasTag_Tag_T.MessageId

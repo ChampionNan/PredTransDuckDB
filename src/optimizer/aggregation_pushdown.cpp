@@ -196,6 +196,9 @@ unique_ptr<LogicalOperator> AggregationPushdown::ReplaceRootCountWithSum(unique_
 
             op_node->ResolveOperatorTypes();
             return op_node;
+        } else {
+            // Case2: No final aggregation node replacement
+            return op_node;
         }
     } else if (query_type == QueryType::MINMAX_AGGREGATE) {
         auto &agg = op_node->children[0]->Cast<LogicalAggregate>();

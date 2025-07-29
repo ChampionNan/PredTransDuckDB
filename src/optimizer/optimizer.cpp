@@ -144,8 +144,8 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
             plan = optimizer.Optimize(std::move(plan));
         }
 #ifdef PLAN_DEBUG
-		std::cout << "After First Join Order Plan " << std::endl;
-		plan->Print();
+		// std::cout << "After First Join Order Plan " << std::endl;
+		// plan->Print();
 #endif // DEBUG
 	});
 
@@ -172,9 +172,9 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		});
 		plan = PT.Optimize(std::move(plan));
 #ifdef PLAN_DEBUG
-		std::cout << "After PT Plan " << std::endl;
-		plan->Print();
-		PT.PrintUseBFAndRelatedCreate(plan);
+		// std::cout << "After PT Plan " << std::endl;
+		// plan->Print();
+		// PT.PrintUseBFAndRelatedCreate(plan);
 #endif
 	}
 #endif
@@ -193,6 +193,7 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		// plan_copy->Print();
 		// PrintOperatorBindings(plan.get());
 #endif
+        // Step1: Copy the plan, and record the true agg apply node
 		RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
 			AggregationPushdown aggregation_pushdown(binder, context, query_type);
 			plan_copy = aggregation_pushdown.Rewrite(std::move(plan_copy));
@@ -209,23 +210,19 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
                 plan_copy = aggregation_pushdown.UpdateBinding(std::move(plan_copy));
             });
         }
-#ifdef PLAN_DEBUG
-        // std::cout << "After First Agg Pass " << std::endl;
-        // plan_copy->Print();
-        // PrintOperatorBindings(plan_copy.get());
-#endif // DEBUG
         /*
         RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
             AggregationPushdown aggregation_pushdown(binder, context, query_type);
             plan = aggregation_pushdown.PruneAggregation(std::move(plan), &AggregationPushdown::RemoveHeavyAggregation);
         });*/
+        // Step2: Use the record to apply the real aggre prune to the plan
         RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
             AggregationPushdown aggregation_pushdown(binder, context, query_type);
             aggregation_pushdown.RecordAggPushdown(plan_copy);
             plan = aggregation_pushdown.ApplyAgg(std::move(plan));
         });
 #ifdef PLAN_DEBUG
-        std::cout << "Before apply agg" << std::endl;
+        std::cout << "After apply agg without pruning" << std::endl;
         plan->Print();
         PrintOperatorBindings(plan.get());
 #endif // DEBUG
@@ -246,7 +243,7 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
         PrintOperatorBindings(plan.get());
 #endif // DEBUG
 	}
-#endif
+#endif // YANPLUS
 
 #ifndef YANPLUS
     // removes unused columns
@@ -323,8 +320,8 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		});
 	}
 
-	// std::cout << "After All Optimizations Plan " << std::endl;
-	// plan->Print();
+	std::cout << "After All Optimizations Plan " << std::endl;
+	plan->Print();
 	// PrintOperatorBindings(plan.get());
 
 	auto total_end = std::chrono::high_resolution_clock::now();

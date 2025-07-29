@@ -349,7 +349,7 @@ extension_external
 *100*
 job_csv
 social-network-sf10-merged-fk
-test_db*
+*_db*
 epinions.txt
 out.txt
 result.txt

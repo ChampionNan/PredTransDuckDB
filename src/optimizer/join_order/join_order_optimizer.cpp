@@ -155,18 +155,18 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::CallSolveJoinOrderFixed(unique_p
 	unique_ptr<LogicalOperator> new_logical_plan = nullptr;
 
 #ifdef PLAN_DEBUG
-	std::cout << "Print Relations in JoinOrderOptimizer::CallSolveJoinOrderFixed: " << std::endl;
-	query_graph_manager.relation_manager.PrintRelations();
+	// std::cout << "Print Relations in JoinOrderOptimizer::CallSolveJoinOrderFixed: " << std::endl;
+	// query_graph_manager.relation_manager.PrintRelations();
 	// Debug: Print all edges in query graph
-    std::cout << "Dumping all query graph edges in CallSolveJoinOrderFixed:" << std::endl;
-    const auto &query_graph = query_graph_manager.GetQueryGraphEdges();
-    std::cout << query_graph.ToString() << std::endl; // Use ToString() which is const-qualified
+    // std::cout << "Dumping all query graph edges in CallSolveJoinOrderFixed:" << std::endl;
+    // const auto &query_graph = query_graph_manager.GetQueryGraphEdges();
+    // std::cout << query_graph.ToString() << std::endl; // Use ToString() which is const-qualified
 
-	std::cout << "Relations in CallSolveJoinOrderFixed: " << std::endl;
-	for (idx_t i = 0; i < query_graph_manager.relation_manager.NumRelations(); i++) {
-		auto &relation = query_graph_manager.set_manager.GetJoinRelation(i);
-		std::cout << relation.ToString() << std::endl;
-	}
+	// std::cout << "Relations in CallSolveJoinOrderFixed: " << std::endl;
+	// for (idx_t i = 0; i < query_graph_manager.relation_manager.NumRelations(); i++) {
+	// 	auto &relation = query_graph_manager.set_manager.GetJoinRelation(i);
+	//	std::cout << relation.ToString() << std::endl;
+	// }
 #endif
 	if (GYO) {
 		// query graph now has filters and relations

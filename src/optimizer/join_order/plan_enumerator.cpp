@@ -1038,14 +1038,12 @@ unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderGYO() {
     
     // Track which current relation set each original relation belongs to
     unordered_map<idx_t, JoinRelationSet*> relation_to_current_set;
-    
-    // Initialize leaf plans
+
+	// Initialize leaf plans
+	InitLeafPlans();
     auto relation_stats = query_graph_manager.relation_manager.GetRelationStats();
     for (idx_t i = 0; i < query_graph_manager.relation_manager.NumRelations(); i++) {
         auto& relation_set = query_graph_manager.set_manager.GetJoinRelation(i);
-        auto node = make_uniq<JoinNode>(relation_set);
-        node->cardinality = relation_stats[i].cardinality;
-        plans[relation_set] = std::move(node);
         relation_to_current_set[i] = &relation_set;
     }
     
