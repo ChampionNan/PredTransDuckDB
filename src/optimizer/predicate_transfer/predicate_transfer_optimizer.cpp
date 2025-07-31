@@ -133,10 +133,9 @@ vector<pair<idx_t, shared_ptr<BlockedBloomFilter>>> PredicateTransferOptimizer::
 		if(temp_result_to_create.size() == 0) {
 			return result;
 		} else {
-			/*
 			if(!PossibleFilterAny(node, reverse)) {
 				return result;
-			}*/
+			}
 			auto create_bf = BuildSingleCreateOperator(node, temp_result_to_create);
 			for (auto &filter : create_bf->bf_to_create) {
 				result.emplace_back(make_pair(cur, filter));

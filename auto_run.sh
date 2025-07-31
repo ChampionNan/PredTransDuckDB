@@ -28,7 +28,7 @@ DUCK_NUM=${3:-1}
 declare -A DUCK_MAP=(
   [1]="./duckdb_origin"
   [2]="./duckdb_PT"
-  [3]="./build/release/duckdb"
+  [3]="./duckdb_YanPlus"
 )
 
 if [[ -z ${DUCK_MAP[$DUCK_NUM]} ]]; then

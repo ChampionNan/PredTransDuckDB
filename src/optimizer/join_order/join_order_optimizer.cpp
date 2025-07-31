@@ -168,6 +168,9 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::CallSolveJoinOrderFixed(unique_p
 	//	std::cout << relation.ToString() << std::endl;
 	// }
 #endif
+	// FIXME: Add plan_enumerator.SolveJoinOrderFixed here, when exec_order not empty -> select * query
+	// Reference https://github.com/ChampionNan/PredTransDuckDB/commit/bb35b5010ee5704c68e20a2f837ff418329e2dc2
+
 	if (GYO) {
 		// query graph now has filters and relations
 		auto cost_model = CostModel(query_graph_manager);

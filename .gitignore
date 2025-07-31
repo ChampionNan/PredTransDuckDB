@@ -352,7 +352,7 @@ social-network-sf10-merged-fk
 *_db*
 epinions.txt
 out.txt
-result.txt
+*.txt
 test_tpch.sql
 .vscode-server
 root
