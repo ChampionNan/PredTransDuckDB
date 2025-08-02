@@ -186,7 +186,7 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 	});
 
 #ifdef YANPLUS // NOTE: Optimiztion for aggregation
-	if (query_type == QueryType::COUNT_STAR || query_type == QueryType::MINMAX_AGGREGATE) {
+	if (query_type == QueryType::COUNT_STAR || query_type == QueryType::MINMAX_AGGREGATE || query_type == QueryType::SUM) {
         unique_ptr<LogicalOperator> plan_copy = plan->Copy(context);
 #ifdef PLAN_DEBUG
 		// std::cout << "Before AGGREGATION_PUSHDOWN Plan " << std::endl;
@@ -363,7 +363,7 @@ QueryType Optimizer::DetectQueryType(LogicalOperator* op) {
         }
     }
     
-    // Case 3: SELECT MIN(a), MAX(b) FROM table
+    // Case 3: SELECT MIN(a), MAX(b) FROM table; Or SELECT SUM(a) FROM table [GROUP BY];
     // Also projection over aggregate, but with MIN/MAX functions
     if (op->type == LogicalOperatorType::LOGICAL_PROJECTION && 
         op->children.size() == 1 && 
@@ -374,26 +374,34 @@ QueryType Optimizer::DetectQueryType(LogicalOperator* op) {
         // Check if this has no GROUP BY
         if (agg.groups.empty() && !agg.expressions.empty()) {
             bool is_minmax_aggregate = true;
+            bool is_sum_aggregate = true;
             
             // Check all aggregate expressions
             for (auto& expr : agg.expressions) {
                 if (expr->GetExpressionClass() == ExpressionClass::BOUND_AGGREGATE) {
                     auto& bound_agg = expr->Cast<BoundAggregateExpression>();
-                    
                     // Only MIN, MAX allowed for simple aggregate type
                     if (bound_agg.function.name != "min" && 
                         bound_agg.function.name != "max") {
                         is_minmax_aggregate = false;
-                        break;
+                    } else if (bound_agg.function.name != "sum") {
+                        is_sum_aggregate = false;
                     }
                 } else {
                     is_minmax_aggregate = false;
+                    is_sum_aggregate = false;
                     break;
                 }
             }
             
             if (is_minmax_aggregate) {
                 return QueryType::MINMAX_AGGREGATE;
+            } else if (is_sum_aggregate) {
+                // If we have SUM, we can still consider it a minmax aggregate
+                return QueryType::SUM;
+            } else {
+                // If we have other aggregates, it's not a simple minmax aggregate
+                return QueryType::OTHER;
             }
         }
     }

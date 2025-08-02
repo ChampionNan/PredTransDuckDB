@@ -27,7 +27,7 @@ DUCK_NUM=${3:-1}
 
 declare -A DUCK_MAP=(
   [1]="./duckdb_origin"
-  [2]="./duckdb_PT"
+  [2]="./duckdb_RPT"
   [3]="./duckdb_YanPlus"
 )
 
@@ -75,7 +75,7 @@ do
         cat ${QUERY} >> ${SUBMIT_QUERY}
         echo ") TO '/dev/null' (DELIMITER ',');" >> ${SUBMIT_QUERY}
         echo "Start ${DUCKDB_BIN} Task at ${QUERY}"
-        for ((current_task=1; current_task<=5; current_task++)); 
+        for ((current_task=1; current_task<=1; current_task++)); 
         do
             echo "Current Task: ${current_task}"
             timeout -s SIGKILL 5m ${DUCKDB_BIN} -c ".open ${DATABASE}_db" -c "SET threads TO ${NUM_THREADS};" -c ".timer off" -c ".read ${SUBMIT_QUERY}" -c ".timer on" -c ".read ${SUBMIT_QUERY}" 2>&1 | tee -a "${LOG_FILE}" | tail -n 1 | awk '{print $1}' >> "${TIME_FILE}"
