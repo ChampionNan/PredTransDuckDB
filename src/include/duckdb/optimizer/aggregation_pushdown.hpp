@@ -44,11 +44,11 @@ public:
 
     struct SumAggInfo {
         string expression_string;                   // Store original form, like a * b + c
-        vector<AggColumnInfo> invloved_columns;     // a, b, c related binding info
+        vector<AggColumnInfo> involved_columns;     // a, b, c related binding info
         ColumnBinding result_binding;               // Binding for the SUM aggregate
         unique_ptr<Expression> expression_tree;     // The actual expression for the SUM
         LogicalType result_type;                    // Type of the result
-        String alias;                               // Alias for the SUM aggregate    
+        string alias;                               // Alias for the SUM aggregate    
 
         // Constructor
         SumAggInfo() = default;
@@ -87,9 +87,9 @@ public:
         SumAggInfo& operator=(SumAggInfo&& other) noexcept = default;
 
         // Check if this SUM aggregate involves a specific column
-        bool InvolvestColumn(const ColumnBinding& binding) const {
+        bool InvolveColumn(const ColumnBinding& binding) const {
             for (const auto& col : involved_columns) {
-                if (col.result_binding == binding) {
+                if (col.binding == binding) {
                     return true;
                 }
             }
@@ -133,6 +133,8 @@ public:
 // 2. Annot Tool Function
 
     void UpdateMinMax();
+
+    void UpdateSum();
 
     void UpdateBindingMapOnce(const ColumnBinding old_binding, const ColumnBinding new_binding);
 
