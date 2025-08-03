@@ -127,55 +127,48 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 	// then we perform the join ordering optimization
 	// this also rewrites cross products + filters into joins and performs filter pushdowns
 	// auto start2 = std::chrono::high_resolution_clock::now();
-#ifdef YANPLUS
-    bool GYO = true;
-#endif // YANPLUS
 
 #ifndef YANPLUS
-    bool GYO = false;
+    RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
+		JoinOrderOptimizer optimizer(context);
+        plan = optimizer.Optimize(std::move(plan));
+	});
 #endif // !YANPLUS
 
-	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
+#ifdef YANPLUS
+    // TODO: Remove explain at the beginning
+    auto query_type = DetectQueryType(plan.get());
+    bool GYO = !(query_type == QueryType::OTHER);
+    RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
 		JoinOrderOptimizer optimizer(context, GYO);
         if (GYO) {
             vector<LogicalOperator*> empty_bf_order;
             plan = optimizer.CallSolveJoinOrderFixed(std::move(plan), empty_bf_order);
-        } else {
-            plan = optimizer.Optimize(std::move(plan));
-        }
-#ifdef PLAN_DEBUG
-		// std::cout << "After First Join Order Plan " << std::endl;
-		// plan->Print();
-#endif // DEBUG
+        } 
 	});
 
-	// NOTE: Two pass for full query optimization
-#ifdef YANPLUS
-	auto query_type = DetectQueryType(plan.get());
 	std::cout << "Query Type: " << static_cast<int>(query_type) << std::endl;
 
 	if (query_type == QueryType::SELECT_STAR) {
 		PredicateTransferOptimizer PT(context);
 		plan = PT.PreOptimize(std::move(plan));
 		auto BFOrder = PT.GetBFOrder();
-		/*std::cout << "BFOrder Size: " << BFOrder.size() << std::endl;
+		/* 
+        1. Order debug:  
+        std::cout << "BFOrder Size: " << BFOrder.size() << std::endl;
 		for (auto &node : BFOrder) {
 			std::cout << "BFOrder Node: " << node->ParamsToString() << std::endl;
-		}*/
+		}
+
+        2. Plan Debug:
+        plan->Print();
+        PrintOperatorBindings(plan.get());
+        */
 		RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
 			JoinOrderOptimizer optimizer2(context, GYO);
 			plan = optimizer2.CallSolveJoinOrderFixed(std::move(plan), BFOrder);
-#ifdef PLAN_DEBUG
-			std::cout << "After Second Join Order Plan Begin " << std::endl;
-			plan->Print();
-#endif
 		});
 		plan = PT.Optimize(std::move(plan));
-#ifdef PLAN_DEBUG
-		// std::cout << "After PT Plan " << std::endl;
-		// plan->Print();
-		// PT.PrintUseBFAndRelatedCreate(plan);
-#endif
 	}
 #endif
 
@@ -188,11 +181,6 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 #ifdef YANPLUS // NOTE: Optimiztion for aggregation
 	if (query_type == QueryType::COUNT_STAR || query_type == QueryType::MINMAX_AGGREGATE || query_type == QueryType::SUM) {
         unique_ptr<LogicalOperator> plan_copy = plan->Copy(context);
-#ifdef PLAN_DEBUG
-		// std::cout << "Before AGGREGATION_PUSHDOWN Plan " << std::endl;
-		// plan_copy->Print();
-		// PrintOperatorBindings(plan.get());
-#endif
         // Step1: Copy the plan, and record the true agg apply node
 		RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
 			AggregationPushdown aggregation_pushdown(binder, context, query_type);
@@ -210,22 +198,12 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
                 plan_copy = aggregation_pushdown.UpdateBinding(std::move(plan_copy));
             });
         }
-        /*
-        RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
-            AggregationPushdown aggregation_pushdown(binder, context, query_type);
-            plan = aggregation_pushdown.PruneAggregation(std::move(plan), &AggregationPushdown::RemoveHeavyAggregation);
-        });*/
         // Step2: Use the record to apply the real aggre prune to the plan
         RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
             AggregationPushdown aggregation_pushdown(binder, context, query_type);
             aggregation_pushdown.RecordAggPushdown(plan_copy);
             plan = aggregation_pushdown.ApplyAgg(std::move(plan));
         });
-#ifdef PLAN_DEBUG
-        std::cout << "After apply agg without pruning" << std::endl;
-        plan->Print();
-        PrintOperatorBindings(plan.get());
-#endif // DEBUG
         for (int i = 0; i < max_height; i++) {
             RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
                 RemoveUnusedColumns unused(binder, context, true);
@@ -236,22 +214,14 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
                 plan = aggregation_pushdown.UpdateBinding(std::move(plan));
             });
         }
-        
-#ifdef PLAN_DEBUG
-        std::cout << "After ApplyAgg!" << std::endl;
-        plan->Print();
-        PrintOperatorBindings(plan.get());
-#endif // DEBUG
 	}
 #endif // YANPLUS
 
-#ifndef YANPLUS
     // removes unused columns
     RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
 		RemoveUnusedColumns unused(binder, context, true);
 		unused.VisitOperator(*plan);
 	});
-#endif // !YANPLUS
 
 	RunOptimizer(OptimizerType::IN_CLAUSE, [&]() {
 		InClauseRewriter ic_rewriter(context, *this);
@@ -332,9 +302,34 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 	return std::move(plan);
 }
 
+bool Optimizer::HasJoins(LogicalOperator* op) {
+    if (!op) {
+        return false;
+    }
+    
+    // Check if current operator is a join
+    if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+        op->type == LogicalOperatorType::LOGICAL_ASOF_JOIN ||
+        op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+        op->type == LogicalOperatorType::LOGICAL_ANY_JOIN ||
+        op->type == LogicalOperatorType::LOGICAL_CROSS_PRODUCT) {
+        return true;
+    }
+    
+    // Recursively check children
+    for (auto& child : op->children) {
+        if (HasJoins(child.get())) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
 
 QueryType Optimizer::DetectQueryType(LogicalOperator* op) {
-    if (!op) {
+    bool has_joins = HasJoins(op);
+    if (!op || !has_joins) {
         return QueryType::OTHER;
     }
     

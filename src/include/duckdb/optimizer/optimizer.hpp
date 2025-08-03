@@ -28,6 +28,7 @@ public:
 	//! Return a reference to the client context of this optimizer
 	ClientContext &GetContext();
 
+	bool HasJoins(LogicalOperator* op);
 	QueryType DetectQueryType(LogicalOperator* op);
 	int DetermineMaxHeight(LogicalOperator* op);
 	void PrintOperatorBindings(LogicalOperator* op, const string& prefix = "");
