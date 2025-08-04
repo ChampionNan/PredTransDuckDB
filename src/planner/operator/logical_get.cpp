@@ -31,6 +31,33 @@ optional_ptr<TableCatalogEntry> LogicalGet::GetTable() const {
 
 string LogicalGet::ParamsToString() const {
 	string result = "";
+	// Add projection columns (similar to PhysicalTableScan)
+    if (function.projection_pushdown) {
+        if (function.filter_prune && !projection_ids.empty()) {
+            // Use projection_ids when available (filtered projections)
+            for (idx_t i = 0; i < projection_ids.size(); i++) {
+                const auto &column_id = column_ids[projection_ids[i]];
+                if (column_id < names.size()) {
+                    if (i > 0) {
+                        result += "\n";
+                    }
+                    result += names[column_id];
+                }
+            }
+        } else {
+            // Use column_ids directly
+            for (idx_t i = 0; i < column_ids.size(); i++) {
+                const auto &column_id = column_ids[i];
+                if (column_id < names.size()) {
+                    if (i > 0) {
+                        result += "\n";
+                    }
+                    result += names[column_id];
+                }
+            }
+        }
+    }
+	
 	for (auto &kv : table_filters.filters) {
 		auto &column_index = kv.first;
 		auto &filter = kv.second;

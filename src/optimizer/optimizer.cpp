@@ -123,6 +123,7 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 #ifdef PLAN_DEBUG
 		std::cout << "Before First Join Order Plan " << std::endl;
 		plan->Print();
+        // PrintOperatorBindings(plan.get());
 #endif // DEBUG
 	// then we perform the join ordering optimization
 	// this also rewrites cross products + filters into joins and performs filter pushdowns
@@ -136,50 +137,43 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 #endif // !YANPLUS
 
 #ifdef YANPLUS
-    // TODO: Remove explain at the beginning
     auto query_type = DetectQueryType(plan.get());
+    std::cout << "Query Type: " << static_cast<int>(query_type) << std::endl;
     bool GYO = !(query_type == QueryType::OTHER);
+    
+    // Step1: do the join ordering
     RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
 		JoinOrderOptimizer optimizer(context, GYO);
         if (GYO) {
             vector<LogicalOperator*> empty_bf_order;
             plan = optimizer.CallSolveJoinOrderFixed(std::move(plan), empty_bf_order);
-        } 
+        }
 	});
 
-	std::cout << "Query Type: " << static_cast<int>(query_type) << std::endl;
+    // Begin: Keep the copy
+    auto plan_original = plan->Copy(context);
+    bool is_explain_or_copy = false;
+    if (plan->type == LogicalOperatorType::LOGICAL_EXPLAIN || plan->type == LogicalOperatorType::LOGICAL_COPY_TO_FILE) {
+        is_explain_or_copy = true;
+        plan = std::move(plan->children[0]);
+    }
 
+    // Step2: specific operation for different query types
 	if (query_type == QueryType::SELECT_STAR) {
 		PredicateTransferOptimizer PT(context);
 		plan = PT.PreOptimize(std::move(plan));
 		auto BFOrder = PT.GetBFOrder();
-		/* 
-        1. Order debug:  
+		/*  1. Order debug:  
         std::cout << "BFOrder Size: " << BFOrder.size() << std::endl;
 		for (auto &node : BFOrder) {
 			std::cout << "BFOrder Node: " << node->ParamsToString() << std::endl;
-		}
-
-        2. Plan Debug:
-        plan->Print();
-        PrintOperatorBindings(plan.get());
-        */
+		}*/
 		RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
 			JoinOrderOptimizer optimizer2(context, GYO);
 			plan = optimizer2.CallSolveJoinOrderFixed(std::move(plan), BFOrder);
 		});
 		plan = PT.Optimize(std::move(plan));
-	}
-#endif
-
-	// rewrites UNNESTs in DelimJoins by moving them to the projection
-	RunOptimizer(OptimizerType::UNNEST_REWRITER, [&]() {
-		UnnestRewriter unnest_rewriter;
-		plan = unnest_rewriter.Optimize(std::move(plan));
-	});
-
-#ifdef YANPLUS // NOTE: Optimiztion for aggregation
-	if (query_type == QueryType::COUNT_STAR || query_type == QueryType::MINMAX_AGGREGATE || query_type == QueryType::SUM) {
+	} else if (query_type == QueryType::COUNT_STAR || query_type == QueryType::MINMAX_AGGREGATE || query_type == QueryType::SUM) {
         unique_ptr<LogicalOperator> plan_copy = plan->Copy(context);
         // Step1: Copy the plan, and record the true agg apply node
 		RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
@@ -204,6 +198,8 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
             aggregation_pushdown.RecordAggPushdown(plan_copy);
             plan = aggregation_pushdown.ApplyAgg(std::move(plan));
         });
+        std::cout << "1. After ApplyAgg without pruning " << std::endl;
+	    plan->Print();
         for (int i = 0; i < max_height; i++) {
             RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
                 RemoveUnusedColumns unused(binder, context, true);
@@ -213,9 +209,26 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
                 AggregationPushdown aggregation_pushdown(binder, context, query_type);
                 plan = aggregation_pushdown.UpdateBinding(std::move(plan));
             });
+            std::cout << "1-" << i << "column pruning" << std::endl;
+	        plan->Print();
         }
 	}
+
+    // End: Restore the plan
+    if (is_explain_or_copy) {
+        plan_original->children[0] = std::move(plan);
+        plan = std::move(plan_original);
+    }
 #endif // YANPLUS
+
+    std::cout << "2. After whole Agg-Pushdown Plan " << std::endl;
+	plan->Print();
+
+    // rewrites UNNESTs in DelimJoins by moving them to the projection
+	RunOptimizer(OptimizerType::UNNEST_REWRITER, [&]() {
+		UnnestRewriter unnest_rewriter;
+		plan = unnest_rewriter.Optimize(std::move(plan));
+	});
 
     // removes unused columns
     RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
@@ -290,7 +303,7 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		});
 	}
 
-	std::cout << "After All Optimizations Plan " << std::endl;
+	std::cout << "3. After All Optimizations Plan " << std::endl;
 	plan->Print();
 	// PrintOperatorBindings(plan.get());
 
@@ -303,10 +316,6 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 }
 
 bool Optimizer::HasJoins(LogicalOperator* op) {
-    if (!op) {
-        return false;
-    }
-    
     // Check if current operator is a join
     if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
         op->type == LogicalOperatorType::LOGICAL_ASOF_JOIN ||
@@ -331,6 +340,10 @@ QueryType Optimizer::DetectQueryType(LogicalOperator* op) {
     bool has_joins = HasJoins(op);
     if (!op || !has_joins) {
         return QueryType::OTHER;
+    }
+
+    if (op->type != LogicalOperatorType::LOGICAL_PROJECTION && op->type != LogicalOperatorType::LOGICAL_DISTINCT) {
+        return DetectQueryType(op->children[0].get());
     }
     
     // Case 2: SELECT COUNT(*) FROM table

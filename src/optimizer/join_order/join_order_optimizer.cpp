@@ -140,18 +140,18 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOpera
 	return new_logical_plan;
 }
 
+// Use for two case: 1. GYO 2. Arrange the plan as we have the exec_order for select * query
 unique_ptr<LogicalOperator> JoinOrderOptimizer::CallSolveJoinOrderFixed(unique_ptr<LogicalOperator> plan, vector<LogicalOperator*> &exec_order) {
-
+	// Store a clean copy before any modifications
+    auto plan_backup = plan->Copy(context);
+	
 	// make sure query graph manager has not extracted a relation graph already
 	LogicalOperator *op = plan.get();
-
 	// extract the relations that go into the hyper graph.
 	// We optimize the children of any non-reorderable operations we come across.
 	bool reorderable = query_graph_manager.Build(*op, false);
-
 	// get relation_stats here since the reconstruction process will move all of the relations.
 	auto relation_stats = query_graph_manager.relation_manager.GetRelationStats();
-
 	unique_ptr<LogicalOperator> new_logical_plan = nullptr;
 
 #ifdef PLAN_DEBUG
@@ -161,37 +161,43 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::CallSolveJoinOrderFixed(unique_p
     // std::cout << "Dumping all query graph edges in CallSolveJoinOrderFixed:" << std::endl;
     // const auto &query_graph = query_graph_manager.GetQueryGraphEdges();
     // std::cout << query_graph.ToString() << std::endl; // Use ToString() which is const-qualified
-
 	// std::cout << "Relations in CallSolveJoinOrderFixed: " << std::endl;
 	// for (idx_t i = 0; i < query_graph_manager.relation_manager.NumRelations(); i++) {
 	// 	auto &relation = query_graph_manager.set_manager.GetJoinRelation(i);
 	//	std::cout << relation.ToString() << std::endl;
 	// }
 #endif
-	// FIXME: Add plan_enumerator.SolveJoinOrderFixed here, when exec_order not empty -> select * query
-	// Reference https://github.com/ChampionNan/PredTransDuckDB/commit/bb35b5010ee5704c68e20a2f837ff418329e2dc2
 
-	if (GYO) {
+	if (!exec_order.empty() || GYO) {
 		// query graph now has filters and relations
 		auto cost_model = CostModel(query_graph_manager);
 		// Initialize a plan enumerator.
 		auto plan_enumerator = PlanEnumerator(query_graph_manager, cost_model, query_graph_manager.GetQueryGraphEdges());
-		plan_enumerator.root_op = op;
-		
-		auto gyo_join_tree = plan_enumerator.SolveJoinOrderGYO();
-		if (gyo_join_tree) {
-			new_logical_plan = query_graph_manager.Reconstruct(std::move(plan), *gyo_join_tree);
-			std::cout << "GYO join tree found and reconstructed." << std::endl;
-			// new_logical_plan->Print();
+
+		if (!exec_order.empty()) {
+			plan_enumerator.InitLeafPlans();
+			unique_ptr<JoinNode> final_plan;
+			final_plan = plan_enumerator.SolveJoinOrderFixed(exec_order);
+			new_logical_plan = query_graph_manager.Reconstruct(std::move(plan), *final_plan);
 		} else {
-			// Unable to handle with GYO
-			GYO = false;
+			plan_enumerator.root_op = op;
+			auto gyo_join_tree = plan_enumerator.SolveJoinOrderGYO();
+			if (gyo_join_tree) {
+				new_logical_plan = query_graph_manager.Reconstruct(std::move(plan), *gyo_join_tree);
+				std::cout << "GYO join tree found and reconstructed! " << std::endl;
+			} else {
+				// Unable to handle with GYO
+				std::cout << "GYO join tree not found! " << std::endl;
+				GYO = false;
+			}
 		}
 	}
 
-	if (!GYO) {
-		std::cout << "GYO join tree not found! " << std::endl;
-		return Optimize(std::move(plan)); // Call the main Optimize function without stats
+	if (!GYO || !new_logical_plan){
+		std::cout << "CallSolveJoinOrderFixed Failed and fall back to DuckDB implementation! " << std::endl;
+		// Create a completely fresh optimizer with clean state
+        JoinOrderOptimizer fallback_optimizer(context);  // false = no GYO for fallback
+        return fallback_optimizer.Optimize(std::move(plan_backup));
 	}
 
 	// only perform left right optimizations when stats is null (means we have the top level optimize call)

@@ -438,7 +438,7 @@ unique_ptr<LogicalOperator> AggregationPushdown::ReplaceRootCountWithSum(unique_
 bool AggregationPushdown::CheckPKFK(LogicalOperator* op) {
     // TODO: Add filter_op check
     // Check if operator is LogicalGet
-    if (op->type != LogicalOperatorType::LOGICAL_GET || op->type != LogicalOperatorType::LOGICAL_UNION) {
+    if (op->type != LogicalOperatorType::LOGICAL_GET) {
         return false; // Not a direct table, can't determine PK status
     }
 
@@ -477,15 +477,31 @@ bool AggregationPushdown::CheckPKFK(LogicalOperator* op) {
                 }
                 // For multi-column unique constraint (primary key or unique)
                 else if (!unique_constraint.columns.empty()) {
-                    // Get column name from physical index
-                    string column_name = get_op.names[actual_col_idx];
+                    // Check if ALL columns in the multi-column constraint are available in this operator
+                    bool all_constraint_columns_available = true;
                     
-                    // Check if column name is in the unique constraint
-                    for (auto& constraint_col : unique_constraint.columns) {
-                        if (constraint_col == column_name) {
-                            // std::cout << "Found column in multi-column unique constraint: " << column_name << std::endl;
-                            return true;
+                    for (auto& constraint_col_name : unique_constraint.columns) {
+                        bool found_constraint_column = false;
+                        
+                        // Check if this constraint column is available in the current operator
+                        for (idx_t j = 0; j < bindings.size(); j++) {
+                            idx_t check_col_idx = bindings[j].column_index;
+                            if (check_col_idx < get_op.column_ids.size()) {
+                                idx_t check_actual_col_idx = get_op.column_ids[check_col_idx];
+                                if (check_actual_col_idx < get_op.names.size() && 
+                                    get_op.names[check_actual_col_idx] == constraint_col_name) {
+                                    found_constraint_column = true;
+                                    break;
+                                }
+                            }
                         }
+                        if (!found_constraint_column) {
+                            all_constraint_columns_available = false;
+                            break;
+                        }
+                    }
+                    if (all_constraint_columns_available) {
+                        return true;
                     }
                 }
             }
@@ -516,6 +532,7 @@ unique_ptr<LogicalOperator> AggregationPushdown::AddAnnotAttributeDFS(unique_ptr
         bool addLeft = true;
         bool addRight = true;
         
+        op_node->Print();
         // Check if any column from left child is a unique key
         if (CheckPKFK(join.children[0].get())) {
             addLeft = false;
