@@ -73,7 +73,11 @@ string LogicalGet::ParamsToString() const {
 	if (!function.to_string) {
 		return result;
 	}
-	return result + "\n" + function.to_string(bind_data.get());
+	result += result + "\n" + function.to_string(bind_data.get());
+	if (has_estimated_cardinality) {
+		result += "\n(" + to_string(estimated_cardinality) + ")";
+	}
+	return result;
 }
 
 unique_ptr<LogicalOperator> LogicalGet::FastCopy() {

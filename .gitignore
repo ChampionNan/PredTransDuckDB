@@ -357,3 +357,4 @@ test_tpch.sql
 .vscode-server
 root
 job_1/*
+job_test/*

@@ -165,7 +165,7 @@ public:
 
     unique_ptr<LogicalOperator> PruneAggregationWithProjectionMap(unique_ptr<LogicalOperator> op);
 
-    bool NotHasTooManyGroups(unique_ptr<LogicalOperator>& op);
+    bool AggPruneRules(unique_ptr<LogicalOperator>& op);
 
     void RecordAggPushdown(unique_ptr<LogicalOperator>& op);
 

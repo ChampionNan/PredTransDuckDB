@@ -62,4 +62,17 @@ bool LogicalFilter::SplitPredicates(vector<unique_ptr<Expression>> &expressions)
 	return found_conjunction;
 }
 
+string LogicalFilter::ParamsToString() const {
+	string result;
+	for (idx_t i = 0; i < expressions.size(); i++) {
+		if (i > 0) {
+			result += " AND ";
+		}
+		result += expressions[i]->ToString();
+	}
+	if (has_estimated_cardinality) {
+		result += "(" + to_string(estimated_cardinality) + ")";
+	}
+	return result;
+}
 } // namespace duckdb

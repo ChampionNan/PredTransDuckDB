@@ -168,6 +168,11 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::CallSolveJoinOrderFixed(unique_p
 	// }
 #endif
 
+	// NOTE: Fallback to DuckDB plan when #tables >= 9
+	if (query_graph_manager.relation_manager.NumRelations() >= 9) {
+		GYO = false;
+	}
+
 	if (!exec_order.empty() || GYO) {
 		// query graph now has filters and relations
 		auto cost_model = CostModel(query_graph_manager);

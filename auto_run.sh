@@ -29,6 +29,7 @@ declare -A DUCK_MAP=(
   [1]="./duckdb_origin"
   [2]="./duckdb_RPT"
   [3]="./duckdb_YanPlus"
+  [4]="./duckdb_YanPlus_NoGYO"
 )
 
 if [[ -z ${DUCK_MAP[$DUCK_NUM]} ]]; then
@@ -78,7 +79,7 @@ do
         for ((current_task=1; current_task<=5; current_task++)); 
         do
             echo "Current Task: ${current_task}"
-            timeout -s SIGKILL 3m ${DUCKDB_BIN} -c ".open ${DATABASE}_db" -c "SET threads TO ${NUM_THREADS};" -c ".timer off" -c ".read ${SUBMIT_QUERY}" -c ".timer on" -c ".read ${SUBMIT_QUERY}" 2>&1 | tee -a "${LOG_FILE}" | tail -n 1 | awk '{print $1}' >> "${TIME_FILE}"
+            timeout -s SIGKILL 15m ${DUCKDB_BIN} -c ".open ${DATABASE}_db" -c "SET threads TO ${NUM_THREADS};" -c ".timer off" -c ".read ${SUBMIT_QUERY}" -c ".timer on" -c ".read ${SUBMIT_QUERY}" 2>&1 | tee -a "${LOG_FILE}" | tail -n 1 | awk '{print $1}' >> "${TIME_FILE}"
         done
         awk '{s+=$1} END{if(NR) print "AVG", s/NR}' "$TIME_FILE" >> "$TIME_FILE"
         echo "End DuckDB Task..."

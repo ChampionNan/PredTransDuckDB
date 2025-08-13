@@ -438,8 +438,12 @@ unique_ptr<LogicalOperator> AggregationPushdown::ReplaceRootCountWithSum(unique_
 bool AggregationPushdown::CheckPKFK(LogicalOperator* op) {
     // TODO: Add filter_op check
     // Check if operator is LogicalGet
-    if (op->type != LogicalOperatorType::LOGICAL_GET) {
+    if (op->type != LogicalOperatorType::LOGICAL_GET || op->type != LogicalOperatorType::LOGICAL_FILTER) {
         return false; // Not a direct table, can't determine PK status
+    }
+
+    if (op->type != LogicalOperatorType::LOGICAL_FILTER && op->children.size() == 1 && op->children[0]->type == LogicalOperatorType::LOGICAL_GET) {
+        return CheckPKFK(op->children[0].get());
     }
 
     // Get all column bindings for this operator
@@ -1090,10 +1094,6 @@ unique_ptr<LogicalOperator> AggregationPushdown::CreateDynamicAggregate(unique_p
     
     if (child_node->type != LogicalOperatorType::LOGICAL_GET && child_node->type != LogicalOperatorType::LOGICAL_FILTER) {
         GetAnnotColumnBindingsIdx(child_node.get(), annot_indices);
-    } else if (child_node->type == LogicalOperatorType::LOGICAL_FILTER &&
-               child_node->children.size() == 1 && child_node->children[0]->type == LogicalOperatorType::LOGICAL_GET) {
-        // FIXME: Check this, Aggregation over filter have less gains? 
-        return child_node;
     }
 
     // Get next available table indices
@@ -1539,10 +1539,13 @@ string AggregationPushdown::GetColumnName(LogicalOperator* op, idx_t idx) {
             // Column from right child
             return GetColumnName(join.children[1].get(), idx - left_count);
         }
+    } else if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
+        if (!op->children.empty()) {
+            return GetColumnName(op->children[0].get(), idx);
+        }
     } else {
         throw NotImplementedException("GetColumnName not implemented for this operator type");
     }
-    
     // Default if we can't find a name
     return "col" + std::to_string(idx);
 }
@@ -1889,14 +1892,20 @@ unique_ptr<LogicalOperator> AggregationPushdown::PruneAggregationWithProjectionM
     return std::move(op);
 }
 
-bool AggregationPushdown::NotHasTooManyGroups(unique_ptr<LogicalOperator>& op) {
+bool AggregationPushdown::AggPruneRules(unique_ptr<LogicalOperator>& op) {
     // Check if this is an aggregate operator
     if (op->type == LogicalOperatorType::LOGICAL_PROJECTION && 
         op->children.size() == 1 &&
         op->children[0]->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
     
         auto &agg = op->children[0]->Cast<LogicalAggregate>();
-        return agg.groups.size() <= GROUP_BY_NUM;
+        if (agg.expressions.empty()) {
+            // No aggregation expressions, only group by
+            return false;
+        }
+        if (agg.groups.size() <= GROUP_BY_NUM) {
+            return true;
+        }
     }
     return false;
 }
@@ -1918,10 +1927,10 @@ void AggregationPushdown::RecordAggPushdown(unique_ptr<LogicalOperator>& op) {
         bool left = false, right = false;
     
         if (join.children[0]->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-            left = NotHasTooManyGroups(join.children[0]);
+            left = AggPruneRules(join.children[0]);
         }
         if (join.children[1]->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-            right = NotHasTooManyGroups(join.children[1]);
+            right = AggPruneRules(join.children[1]);
         }
         join_pushdown_info.push_back({join_counter++, left, right});
     }

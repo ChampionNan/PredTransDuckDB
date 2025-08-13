@@ -28,6 +28,8 @@ public:
 	
 	vector<ColumnBinding> GetColumnBindings() override;
 
+	string ParamsToString() const override;
+
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<LogicalOperator> Deserialize(Deserializer &deserializer);
 

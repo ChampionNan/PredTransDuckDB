@@ -34,8 +34,48 @@ unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalAggr
 		ColumnBinding aggregate_binding(aggr.aggregate_index, aggregate_idx);
 		statistics_map[aggregate_binding] = std::move(stats);
 	}
+
+	// NOTE: Operation for update statistics & store for correspond logical_operator
+	auto result_stats = make_uniq<NodeStatistics>();
+
+	if (aggr.groups.empty()) {
+		result_stats->has_estimated_cardinality = 1;
+		result_stats->estimated_cardinality = true;
+		aggr.estimated_cardinality = 1;
+		aggr.has_estimated_cardinality = true;
+	} else {
+		idx_t estimateted_groups = 1;
+		bool has_valid_stats = false;
+
+		for (idx_t group_idx = 0; group_idx < aggr.group_stats.size(); group_idx++) {
+			if (aggr.group_stats[group_idx]) {
+				auto distinct_count = aggr.group_stats[group_idx]->GetDistinctCount();
+				if (distinct_count > 0) {
+					estimateted_groups = std::min(estimateted_groups * distinct_count, 
+												  node_stats ? node_stats->estimated_cardinality : STANDARD_VECTOR_SIZE);
+					has_valid_stats = true;
+				}
+			}
+		}
+
+		if (has_valid_stats) {
+			result_stats->has_estimated_cardinality = true;
+			result_stats->estimated_cardinality = estimateted_groups;
+		} else {
+			result_stats->has_estimated_cardinality = true;
+			result_stats->estimated_cardinality = node_stats->estimated_cardinality;
+		}
+		aggr.estimated_cardinality = result_stats->estimated_cardinality;
+		aggr.has_estimated_cardinality = true;
+	}
+
+	if (node_stats && node_stats->has_max_cardinality) {
+		result_stats->has_max_cardinality = true;
+		result_stats->max_cardinality = node_stats->max_cardinality;
+	}
+
 	// the max cardinality of an aggregate is the max cardinality of the input (i.e. when every row is a unique group)
-	return std::move(node_stats);
+	return std::move(result_stats);
 }
 
 } // namespace duckdb

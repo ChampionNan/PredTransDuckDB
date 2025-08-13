@@ -267,6 +267,7 @@ void RemoveUnusedColumns::VisitOperator(LogicalOperator &op) {
 			if (get.function.filter_prune) {
 				// Now set the projection cols by matching the "selection vector" that excludes filter columns
 				// with the "selection vector" that includes filter columns
+				// NOTE: Add clear to fix the logical_get operator projeciton multiple duplicate columns
 				get.projection_ids.clear();
 				idx_t col_idx = 0;
 				for (auto proj_sel_idx : proj_sel) {
@@ -374,6 +375,82 @@ void RemoveUnusedColumns::VisitOperator(LogicalOperator &op) {
 				}
 			}
 		}
+	}
+}
+
+void RemoveUnusedColumns::GetUpdateBinding(Expression &expr) {
+    if (expr.expression_class == ExpressionClass::BOUND_COLUMN_REF) {
+        auto &col_ref = expr.Cast<BoundColumnRefExpression>();
+        auto it = global_map.find(col_ref.binding);
+        if (it != global_map.end()) {
+            col_ref.binding = it->second;
+        }
+    }
+}
+
+void RemoveUnusedColumns::VisitOperatorBottomUp(LogicalOperator &op) {
+	for (auto &child : op.children) {
+		VisitOperatorBottomUp(*child);
+	}
+	switch (op.type) {
+	case LogicalOperatorType::LOGICAL_PROJECTION: {
+		auto &proj = op.Cast<LogicalProjection>();
+		for (auto &expr : proj.expressions) {
+			GetUpdateBinding(*expr);
+		}
+		vector<unique_ptr<Expression>> new_expressions;
+		column_binding_map_t<idx_t> first_occurrence;
+
+		for (idx_t i = 0; i < proj.expressions.size(); ++i) {
+			bool is_duplicate = false;
+			if (proj.expressions[i]->expression_class == ExpressionClass::BOUND_COLUMN_REF) {
+				auto &col_ref = proj.expressions[i]->Cast<BoundColumnRefExpression>();
+				auto it = first_occurrence.find(col_ref.binding);
+				if (it != first_occurrence.end()) {
+					is_duplicate = true;
+					global_map[ColumnBinding(proj.table_index, i)] = ColumnBinding(proj.table_index, it->second);
+				} else {
+					first_occurrence[col_ref.binding] = new_expressions.size();
+				}
+			}
+			if (!is_duplicate) {
+				if (new_expressions.size() != i) {
+					global_map[ColumnBinding(proj.table_index, i)] = ColumnBinding(proj.table_index, new_expressions.size());
+				}
+				new_expressions.push_back(std::move(proj.expressions[i]));
+			}
+		}
+		proj.expressions = std::move(new_expressions);
+		break;
+	}
+	case LogicalOperatorType::LOGICAL_ASOF_JOIN:
+    case LogicalOperatorType::LOGICAL_DELIM_JOIN:
+    case LogicalOperatorType::LOGICAL_COMPARISON_JOIN: {
+		for (auto &cond : op.Cast<LogicalComparisonJoin>().conditions) {
+			GetUpdateBinding(*cond.left);
+			GetUpdateBinding(*cond.right);
+		}
+		break;
+	}
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_ASOF_JOIN || op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+	    op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &comp_join = op.Cast<LogicalComparisonJoin>();
+		// after removing duplicate columns we may have duplicate join conditions (if the join graph is cyclical)
+		vector<JoinCondition> unique_conditions;
+		for (auto &cond : comp_join.conditions) {
+			bool found = false;
+			for (auto &unique_cond : unique_conditions) {
+				if (cond.comparison == unique_cond.comparison && cond.left->Equals(*unique_cond.left) && cond.right->Equals(*unique_cond.right)) {
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				unique_conditions.push_back(std::move(cond));
+			}
+		}
+		comp_join.conditions = std::move(unique_conditions);
 	}
 }
 

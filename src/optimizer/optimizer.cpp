@@ -212,6 +212,13 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
             std::cout << "1-" << i << "column pruning" << std::endl;
 	        plan->Print();
         }
+        // Fix duplicate column error
+        RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
+            RemoveUnusedColumns unused(binder, context, true);
+            unused.VisitOperatorBottomUp(*plan);
+        });
+        std::cout << "After duplicate fix" << std::endl;
+	    plan->Print();
 	}
 
     // End: Restore the plan
@@ -255,11 +262,11 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 
 	// perform statistics propagation
 	column_binding_map_t<unique_ptr<BaseStatistics>> statistics_map;
-	// RunOptimizer(OptimizerType::STATISTICS_PROPAGATION, [&]() {
-	// 	StatisticsPropagator propagator(*this);
-	// 	propagator.PropagateStatistics(plan);
-	// 	statistics_map = propagator.GetStatisticsMap();
-	// });
+	RunOptimizer(OptimizerType::STATISTICS_PROPAGATION, [&]() {
+	 	StatisticsPropagator propagator(*this);
+	 	propagator.PropagateStatistics(plan);
+	 	statistics_map = propagator.GetStatisticsMap();
+	});
 
 	// creates projection maps so unused columns are projected out early
 	RunOptimizer(OptimizerType::COLUMN_LIFETIME, [&]() {
