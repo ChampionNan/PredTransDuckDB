@@ -25,6 +25,7 @@ public:
 	}
 
 	void VisitOperator(LogicalOperator &op) override;
+	void VisitOperatorBottomUp(LogicalOperator &op);
 
 protected:
 	unique_ptr<Expression> VisitReplace(BoundColumnRefExpression &expr, unique_ptr<Expression> *expr_ptr) override;
@@ -38,6 +39,8 @@ private:
 	bool everything_referenced;
 	//! The map of column references
 	column_binding_map_t<vector<BoundColumnRefExpression *>> column_references;
+	column_binding_map_t<ColumnBinding> global_map;
+
 
 private:
 	template <class T>
@@ -46,5 +49,7 @@ private:
 	//! Perform a replacement of the ColumnBinding, iterating over all the currently found column references and
 	//! replacing the bindings
 	void ReplaceBinding(ColumnBinding current_binding, ColumnBinding new_binding);
+
+	void GetUpdateBinding(Expression &expr);
 };
 } // namespace duckdb

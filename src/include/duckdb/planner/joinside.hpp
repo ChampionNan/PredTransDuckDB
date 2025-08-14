@@ -30,6 +30,8 @@ public:
 public:
 	unique_ptr<Expression> left;
 	unique_ptr<Expression> right;
+	// unique_ptr<Expression> old_left;
+	// unique_ptr<Expression> old_right;
 	ExpressionType comparison;
 };
 

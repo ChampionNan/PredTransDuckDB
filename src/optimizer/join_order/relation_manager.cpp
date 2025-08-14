@@ -39,6 +39,7 @@ void RelationManager::AddAggregateRelation(LogicalOperator &op, optional_ptr<Log
 		D_ASSERT(relation_mapping.find(index) == relation_mapping.end());
 		relation_mapping[index] = relation_id;
 	}
+	// std::cout << "Adding Aggregate Relation: " << op.ToString() << "Id: " << relation_id << std::endl;
 	relations.push_back(std::move(relation));
 }
 
@@ -70,6 +71,7 @@ void RelationManager::AddRelation(LogicalOperator &op, optional_ptr<LogicalOpera
 		D_ASSERT(relation_mapping.find(table_index) == relation_mapping.end());
 		relation_mapping[table_index] = relation_id;
 	}
+	// std::cout << "Adding Relation: \n" << op.ToString() << "Id: " << relation_id << std::endl;
 	relations.push_back(std::move(relation));
 }
 
@@ -179,6 +181,7 @@ bool RelationManager::ExtractJoinRelations(LogicalOperator &input_op,
 		RelationStats child_stats;
 		JoinOrderOptimizer optimizer(context);
 		op->children[0] = optimizer.Optimize(std::move(op->children[0]), &child_stats);
+
 		auto &aggr = op->Cast<LogicalAggregate>();
 		auto operator_stats = RelationStatisticsHelper::ExtractAggregationStats(aggr, child_stats);
 		if (!datasource_filters.empty()) {
@@ -192,6 +195,7 @@ bool RelationManager::ExtractJoinRelations(LogicalOperator &input_op,
 		RelationStats child_stats;
 		JoinOrderOptimizer optimizer(context);
 		op->children[0] = optimizer.Optimize(std::move(op->children[0]), &child_stats);
+
 		auto &window = op->Cast<LogicalWindow>();
 		auto operator_stats = RelationStatisticsHelper::ExtractWindowStats(window, child_stats);
 		AddAggregateRelation(input_op, parent, operator_stats);
@@ -243,11 +247,151 @@ bool RelationManager::ExtractJoinRelations(LogicalOperator &input_op,
 		// optimize the child and copy the stats
 		JoinOrderOptimizer optimizer(context);
 		op->children[0] = optimizer.Optimize(std::move(op->children[0]), &child_stats);
+
 		auto &proj = op->Cast<LogicalProjection>();
 		// Projection can create columns so we need to add them here
 		auto proj_stats = RelationStatisticsHelper::ExtractProjectionStats(proj, child_stats);
 		AddRelation(input_op, parent, proj_stats);
 		return true;
+	}
+	case LogicalOperatorType::LOGICAL_EMPTY_RESULT: {
+		// optimize the child and copy the stats
+		auto &empty_result = op->Cast<LogicalEmptyResult>();
+		// Projection can create columns so we need to add them here
+		auto stats = RelationStatisticsHelper::ExtractEmptyResultStats(empty_result);
+		AddRelation(input_op, parent, stats);
+		return true;
+	}
+	default:
+		return false;
+	}
+}
+
+bool RelationManager::ExtractJoinRelationsNonRecursive(LogicalOperator &input_op,
+                                           vector<reference<LogicalOperator>> &filter_operators,
+                                           optional_ptr<LogicalOperator> parent) {
+	LogicalOperator *op = &input_op;
+	vector<reference<LogicalOperator>> datasource_filters;
+	// pass through single child operators
+	while (op->children.size() == 1 && !OperatorNeedsRelation(op->type)) {
+		if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
+			if (HasNonReorderableChild(*op)) {
+				datasource_filters.push_back(*op);
+			}
+			filter_operators.push_back(*op);
+		}
+		op = op->children[0].get();
+	}
+	bool non_reorderable_operation = false;
+	if (OperatorIsNonReorderable(op->type)) {
+		// set operation, optimize separately in children
+		non_reorderable_operation = true;
+	}
+
+	if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &join = op->Cast<LogicalComparisonJoin>();
+		if (join.join_type == JoinType::INNER) {
+			// extract join conditions from inner join
+			filter_operators.push_back(*op);
+		} else {
+			non_reorderable_operation = true;
+		}
+	}
+	if (non_reorderable_operation) {
+		// we encountered a non-reordable operation (setop or non-inner join)
+		// we do not reorder non-inner joins yet, however we do want to expand the potential join graph around them
+		// non-inner joins are also tricky because we can't freely make conditions through them
+		// e.g. suppose we have (left LEFT OUTER JOIN right WHERE right IS NOT NULL), the join can generate
+		// new NULL values in the right side, so pushing this condition through the join leads to incorrect results
+		// for this reason, we just start a new JoinOptimizer pass in each of the children of the join
+		// stats.cardinality will be initiated to highest cardinality of the children.
+		vector<RelationStats> children_stats;
+		for (auto &child : op->children) {
+			auto stats = RelationStats();
+			children_stats.push_back(stats);
+		}
+
+		auto combined_stats = RelationStatisticsHelper::CombineStatsOfNonReorderableOperator(*op, children_stats);
+		if (!datasource_filters.empty()) {
+			combined_stats.cardinality =
+			    (idx_t)MaxValue(combined_stats.cardinality * RelationStatisticsHelper::DEFAULT_SELECTIVITY, (double)1);
+		}
+		AddRelation(input_op, parent, combined_stats);
+		return true;
+	}
+
+	switch (op->type) {
+	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY: {
+		// optimize children
+		RelationStats child_stats;
+		auto &aggr = op->Cast<LogicalAggregate>();
+		auto operator_stats = RelationStatisticsHelper::ExtractAggregationStats(aggr, child_stats);
+		if (!datasource_filters.empty()) {
+			operator_stats.cardinality *= RelationStatisticsHelper::DEFAULT_SELECTIVITY;
+		}
+		bool can_reorder = ExtractJoinRelationsNonRecursive(*op->children[0], filter_operators, op);
+		// AddAggregateRelation(input_op, parent, operator_stats);
+		return can_reorder;
+	}
+	case LogicalOperatorType::LOGICAL_WINDOW: {
+		// optimize children
+		RelationStats child_stats;
+		auto &window = op->Cast<LogicalWindow>();
+		auto operator_stats = RelationStatisticsHelper::ExtractWindowStats(window, child_stats);
+		bool can_reorder = ExtractJoinRelationsNonRecursive(*op->children[0], filter_operators, op);
+		// AddAggregateRelation(input_op, parent, operator_stats);
+		return can_reorder;
+	}
+	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
+	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT: {
+		// Adding relations to the current join order optimizer
+		bool can_reorder_left = ExtractJoinRelations(*op->children[0], filter_operators, op);
+		bool can_reorder_right = ExtractJoinRelations(*op->children[1], filter_operators, op);
+		return can_reorder_left && can_reorder_right;
+	}
+	case LogicalOperatorType::LOGICAL_DUMMY_SCAN: {
+		auto &dummy_scan = op->Cast<LogicalDummyScan>();
+		auto stats = RelationStatisticsHelper::ExtractDummyScanStats(dummy_scan, context);
+		AddRelation(input_op, parent, stats);
+		return true;
+	}
+	case LogicalOperatorType::LOGICAL_EXPRESSION_GET: {
+		// base table scan, add to set of relations.
+		// create empty stats for dummy scan or logical expression get
+		auto &expression_get = op->Cast<LogicalExpressionGet>();
+		auto stats = RelationStatisticsHelper::ExtractExpressionGetStats(expression_get, context);
+		AddRelation(input_op, parent, stats);
+		return true;
+	}
+	case LogicalOperatorType::LOGICAL_GET: {
+		// TODO: Get stats from a logical GET
+		auto &get = op->Cast<LogicalGet>();
+		auto stats = RelationStatisticsHelper::ExtractGetStats(get, context);
+		// if there is another logical filter that could not be pushed down into the
+		// table scan, apply another selectivity.
+		if (!datasource_filters.empty()) {
+			stats.cardinality =
+			    (idx_t)MaxValue(stats.cardinality * RelationStatisticsHelper::DEFAULT_SELECTIVITY, (double)1);
+		}
+		AddRelation(input_op, parent, stats);
+		return true;
+	}
+	case LogicalOperatorType::LOGICAL_DELIM_GET: {
+		//      Removed until we can extract better stats from delim gets. See #596
+		//		auto &delim_get = op->Cast<LogicalDelimGet>();
+		//		auto stats = RelationStatisticsHelper::ExtractDelimGetStats(delim_get, context);
+		//		AddRelation(input_op, parent, stats);
+		return false;
+	}
+	case LogicalOperatorType::LOGICAL_PROJECTION: {
+		auto child_stats = RelationStats();
+		// optimize the child and copy the stats
+		auto &proj = op->Cast<LogicalProjection>();
+		// Projection can create columns so we need to add them here
+		auto proj_stats = RelationStatisticsHelper::ExtractProjectionStats(proj, child_stats);
+		bool can_reorder = ExtractJoinRelationsNonRecursive(*op->children[0], filter_operators, op);
+		// AddRelation(input_op, parent, proj_stats);
+		return can_reorder;
 	}
 	case LogicalOperatorType::LOGICAL_EMPTY_RESULT: {
 		// optimize the child and copy the stats

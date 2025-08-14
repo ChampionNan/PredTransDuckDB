@@ -3,6 +3,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/optimizer/join_order/join_node.hpp"
 #include "duckdb/optimizer/join_order/query_graph_manager.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 
 #include <random>
 #include <cmath>
@@ -503,7 +504,6 @@ void PlanEnumerator::InitLeafPlans() {
 	// nodes of the join tree NOTE: we can just use pointers to JoinRelationSet* here because the GetJoinRelation
 	// function ensures that a unique combination of relations will have a unique JoinRelationSet object.
 	// first initialize equivalent relations based on the filters
-	std::cout << "InitLeafPlans! " << std::endl;
 	auto relation_stats = query_graph_manager.relation_manager.GetRelationStats();
 
 	cost_model.cardinality_estimator.InitEquivalentRelations(query_graph_manager.GetFilterBindings());
@@ -525,7 +525,6 @@ void PlanEnumerator::InitLeafPlans() {
 // Moerkotte and Thomas Neumannn, see that paper for additional info/documentation bonus slides:
 // https://db.in.tum.de/teaching/ws1415/queryopt/chapter3.pdf?lang=de
 unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrder() {
-	std::cout << "SolverJoinOrder! " << std::endl;
 	bool force_no_cross_product = query_graph_manager.context.config.force_no_cross_product;
 	// first try to solve the join order exactly
 	if (!SolveJoinOrderExactly()) {
@@ -740,4 +739,448 @@ unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderLeftDeepRandom() {
 	auto final_plan = plans.find(total_relation);
 	return std::move(final_plan->second);
 }
+
+unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderFixed(vector<LogicalOperator*> &exec_order) {
+    if (exec_order.empty()) {
+        return nullptr;
+    }
+    vector<reference<JoinRelationSet>> join_relations; // T in the paper
+
+    for (auto &op : exec_order) {
+        auto table_index = op->GetTableIndex()[0];
+        auto relation_index = query_graph_manager.relation_manager.relation_mapping[table_index];
+        join_relations.push_back(query_graph_manager.set_manager.GetJoinRelation(relation_index));
+		// std::cout << "Op: \n" << op->ToString() << " LogicalOperator Index: " << table_index << " JoinNode Index: " << relation_index << std::endl;
+		// std::cout << join_relations.back().get().ToString() << std::endl;
+    }
+#ifdef PLAN_DEBUG
+    std::cout << "Edges: \n" << std::endl;
+    for (idx_t i = 0; i < query_graph_manager.relation_manager.NumRelations(); i++) {
+        auto &relation1 = query_graph_manager.set_manager.GetJoinRelation(i);
+        for (idx_t j = 0; j < query_graph_manager.relation_manager.NumRelations(); j++) {
+            if (i != j) {
+                auto &relation2 = query_graph_manager.set_manager.GetJoinRelation(j);
+                auto connections = query_graph.GetConnections(relation1, relation2);
+                if (!connections.empty()) {
+                    std::cout << "Connection between " << relation1.ToString() << " and " << relation2.ToString() << std::endl;
+                }
+            }
+        }
+    }
+#endif // DEBUG PLAN_DEBUG
+    // Start with the first relation in join_relations
+    auto current_set = &join_relations[0].get();
+    
+    // Create a vector of indices of remaining relations to process
+    vector<size_t> remaining_indices;
+    for (size_t i = 1; i < join_relations.size(); i++) {
+        remaining_indices.push_back(i);
+    }
+
+    unique_ptr<JoinNode> last_node = nullptr;
+
+	std::cout << "\nStart Root Set: " << current_set->ToString() << std::endl;
+
+    while (!remaining_indices.empty()) {
+        bool found_connection = false;
+
+        // Try each remaining relation to find one that can connect to current_set
+        for (size_t idx = 0; idx < remaining_indices.size(); idx++) {
+            size_t i = remaining_indices[idx];
+            auto next_set = &join_relations[i].get();
+            // Check if we can connect these sets
+            auto connection = query_graph.GetConnections(*current_set, *next_set);
+            if (!connection.empty()) {
+                // Directly create a join node
+                auto left_plan = plans.find(*current_set);
+                auto right_plan = plans.find(*next_set);
+                if (left_plan == plans.end() || right_plan == plans.end()) {
+                    throw InternalException("No left or right plan: internal error in join order optimizer");
+                }
+                
+                optional_ptr<NeighborInfo> best_connection = nullptr;
+                if (!connection.empty()) {
+                    best_connection = &connection.back().get();
+                }
+                
+                // Create a new JoinNode using the existing JoinNodes
+                auto new_set = &query_graph_manager.set_manager.Union(*current_set, *next_set);
+                last_node = make_uniq<JoinNode>(*new_set, best_connection, *left_plan->second, *right_plan->second, 0);
+                current_set = &last_node->set;
+                plans[*new_set] = std::move(last_node);
+                // Remove the connected relation index from remaining_indices
+                remaining_indices.erase(remaining_indices.begin() + idx);
+                found_connection = true;
+                break;
+            }
+        }
+
+        if (!found_connection) {
+            std::cout << "No valid connection found, stopping." << std::endl;
+            break;
+        }
+    }
+
+    if (remaining_indices.empty() && current_set) {
+		auto final_plan = plans.find(*current_set);
+		if (final_plan != plans.end()) {
+			return std::move(final_plan->second);
+		}
+	}
+	return nullptr;
+}
+
+void PlanEnumerator::GetOutputVariables() {
+    auto logical_plan = root_op;
+    if (logical_plan && logical_plan->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+        // Directly access expressions from LogicalOperator base class
+        for (auto& expression : logical_plan->expressions) {
+            if (expression->type == ExpressionType::BOUND_COLUMN_REF) {
+                auto col_ref = reinterpret_cast<BoundColumnRefExpression*>(expression.get());
+                output_variables.insert(col_ref->binding);
+            }
+			// TODO: Other types, and should record the root child node attrs
+        }
+    }
+}
+
+RelationalHypergraph PlanEnumerator::BuildRelationalHypergraph() {
+    RelationalHypergraph graph;
+    idx_t next_vertex_id = 0;
+
+	GetOutputVariables();
+    
+    // Map to track join equivalence classes
+    column_binding_map_t<column_binding_set_t> equivalence_classes;
+    
+    // First pass: identify join equivalence classes
+    for (auto& filter_info : query_graph_manager.GetFilterBindings()) {
+        if (filter_info->filter->type == ExpressionType::COMPARE_EQUAL) {
+            // Add both bindings to the same equivalence class
+            equivalence_classes[filter_info->left_binding].insert(filter_info->right_binding);
+            equivalence_classes[filter_info->right_binding].insert(filter_info->left_binding);
+            
+            // Make sure each binding is in its own equivalence class too
+            equivalence_classes[filter_info->left_binding].insert(filter_info->left_binding);
+            equivalence_classes[filter_info->right_binding].insert(filter_info->right_binding);
+        }
+    }
+    
+    // Merge equivalence classes transitively
+    bool changes_made;
+    do {
+        changes_made = false;
+        for (auto& [binding, equiv_set] : equivalence_classes) {
+            size_t original_size = equiv_set.size();
+            
+            // Create a copy to avoid modifying during iteration
+            auto equiv_copy = equiv_set;
+            for (auto& equiv_binding : equiv_copy) {
+                if (equiv_binding != binding) {
+                    // Merge all bindings from this equivalence class
+                    for (auto& transitive_binding : equivalence_classes[equiv_binding]) {
+                        equiv_set.insert(transitive_binding);
+                    }
+                }
+            }
+            
+            if (equiv_set.size() > original_size) {
+                changes_made = true;
+            }
+        }
+    } while (changes_made);
+    
+    // Assign the same vertex ID to all members of each equivalence class
+    column_binding_map_t<idx_t> binding_to_vertex;
+    for (auto& [binding, equiv_set] : equivalence_classes) {
+        if (binding_to_vertex.find(binding) == binding_to_vertex.end()) {
+            // Assign a new vertex ID to this entire equivalence class
+            idx_t vertex_id = next_vertex_id++;
+			bool is_output_vertex = false;
+            for (auto& equiv_binding : equiv_set) {
+                binding_to_vertex[equiv_binding] = vertex_id;
+				if (output_variables.find(equiv_binding) != output_variables.end()) {
+					is_output_vertex = true;
+				}
+            }
+			if (is_output_vertex) {
+                graph.output_vertices.insert(vertex_id);
+            }
+            // Only store one representative column binding for this vertex
+            graph.vertex_to_column.push_back(binding);
+        }
+    }
+    
+    // Transfer the final mapping
+    graph.column_to_vertex = binding_to_vertex;
+    
+    // Second pass: create hyperedges (relations)
+    for (idx_t rel_idx = 0; rel_idx < query_graph_manager.relation_manager.NumRelations(); rel_idx++) {
+        unordered_set<idx_t> relation_vertices;
+        
+        // Find all attributes that belong to this relation
+        for (auto& [column, vertex_id] : graph.column_to_vertex) {
+            if (column.table_index == rel_idx) {
+                relation_vertices.insert(vertex_id);
+            }
+        }
+        
+        // Only add relations that have vertices (are involved in joins)
+        if (!relation_vertices.empty()) {
+            graph.relations.push_back(std::move(relation_vertices));
+            graph.relation_indices.push_back(rel_idx);
+        }
+    }
+    
+    return graph;
+}
+
+bool PlanEnumerator::IsEar(RelationalHypergraph& graph, idx_t relation_idx, idx_t& witness_idx) {
+    const auto& relation = graph.relations[relation_idx];
+    
+    // Find attributes unique to this relation
+    unordered_set<idx_t> unique_attrs;
+    unordered_set<idx_t> shared_attrs;
+    
+    for (auto vertex : relation) {
+        bool appears_elsewhere = false;
+        
+        // Check if this vertex appears in any other relation
+        for (idx_t other_idx = 0; other_idx < graph.relations.size(); other_idx++) {
+            if (other_idx == relation_idx) {
+                continue;
+            }
+            
+            if (graph.relations[other_idx].find(vertex) != graph.relations[other_idx].end()) {
+                appears_elsewhere = true;
+                shared_attrs.insert(vertex);
+                break;
+            }
+        }
+        
+        if (!appears_elsewhere) {
+            unique_attrs.insert(vertex);
+        }
+    }
+    
+    // Case 1: Has unique attributes (original logic)
+    if (!unique_attrs.empty()) {
+        // Find a relation that contains all shared attributes
+        for (idx_t other_idx = 0; other_idx < graph.relations.size(); other_idx++) {
+            if (other_idx == relation_idx) continue;
+            
+            const auto& other_relation = graph.relations[other_idx];
+            bool contains_all_shared = true;
+            
+            for (auto shared_attr : shared_attrs) {
+                if (other_relation.find(shared_attr) == other_relation.end()) {
+                    contains_all_shared = false;
+                    break;
+                }
+            }
+            
+            if (contains_all_shared) {
+                witness_idx = other_idx;
+                return true;
+            }
+        }
+        
+        // If no shared attributes, any other relation can be witness
+		if (shared_attrs.empty()) {
+        	if (graph.relations.size() == 1) {
+            	// This is the last relation - it's the root
+				witness_idx = relation_idx;
+	            return true;
+    	    } else {
+        	    throw InternalException("No shared attributes for this relation and not the root node! ");
+        	}
+    	}
+    }
+    
+    // Case 2: All attributes are contained in a single other relation (your fix)
+    if (unique_attrs.empty() && !shared_attrs.empty()) {
+        // Check if ALL attributes of this relation are contained in a single other relation
+        for (idx_t other_idx = 0; other_idx < graph.relations.size(); other_idx++) {
+            if (other_idx == relation_idx) continue;
+            
+            const auto& other_relation = graph.relations[other_idx];
+            bool contains_all_attributes = true;
+            
+            // Check if other_relation contains ALL attributes of our relation
+            for (auto attr : relation) {
+                if (other_relation.find(attr) == other_relation.end()) {
+                    contains_all_attributes = false;
+                    break;
+                }
+            }
+            
+            if (contains_all_attributes) {
+                witness_idx = other_idx;
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+
+unique_ptr<JoinNode> PlanEnumerator::SolveJoinOrderGYO() {
+    // Build the relational hypergraph
+    auto graph = BuildRelationalHypergraph();
+    
+    // Clear any previous reduction sequence
+    gyo_reduction_sequence.clear();
+    
+    // No relations or trivial case
+    if (graph.relations.size() <= 1) {
+        return nullptr;
+    }
+    
+    // Track which current relation set each original relation belongs to
+    unordered_map<idx_t, JoinRelationSet*> relation_to_current_set;
+
+	// Initialize leaf plans
+	InitLeafPlans();
+    auto relation_stats = query_graph_manager.relation_manager.GetRelationStats();
+    for (idx_t i = 0; i < query_graph_manager.relation_manager.NumRelations(); i++) {
+        auto& relation_set = query_graph_manager.set_manager.GetJoinRelation(i);
+        relation_to_current_set[i] = &relation_set;
+    }
+    
+    JoinRelationSet* final_set = nullptr;
+    idx_t total_relations = query_graph_manager.relation_manager.NumRelations();
+    
+    // Perform GYO reduction with cost-based optimization
+    bool progress_made = true;
+    while (progress_made && !graph.relations.empty()) {
+        progress_made = false;
+        
+        // Structure to store all valid ear candidates with their costs
+        struct EarCandidate {
+            idx_t ear_idx;
+            idx_t witness_idx;
+			idx_t output_variables_number; 
+            double cost;
+            unique_ptr<JoinNode> join_node;
+            JoinRelationSet* union_set;
+        };
+        
+        vector<EarCandidate> ear_candidates;
+        
+        // Find all possible ears and calculate their costs
+        for (idx_t i = 0; i < graph.relations.size(); i++) {
+            idx_t witness_idx = -1;
+            
+            if (IsEar(graph, i, witness_idx)) {
+                idx_t ear_relation_idx = graph.relation_indices[i];
+                idx_t witness_relation_idx = graph.relation_indices[witness_idx];
+
+				if (ear_relation_idx == witness_relation_idx) {
+					// If ear and witness are the same, we can skip this step, normally, this is the last node
+					continue;
+				}
+                
+                auto* ear_current_set = relation_to_current_set[ear_relation_idx];
+                auto* witness_current_set = relation_to_current_set[witness_relation_idx];
+                
+                // Get connections between these relations
+                auto connections = query_graph.GetConnections(*ear_current_set, *witness_current_set);
+                
+                if (!connections.empty()) {
+                    // Get the existing plans for both relation sets
+                    auto ear_plan = plans.find(*ear_current_set);
+                    auto witness_plan = plans.find(*witness_current_set);
+                    
+                    D_ASSERT(ear_plan != plans.end());
+                    D_ASSERT(witness_plan != plans.end());
+                    
+                    // Create the union relation set
+                    auto& union_set = query_graph_manager.set_manager.Union(*ear_current_set, *witness_current_set);
+                    
+                    // Calculate cost using CreateJoinTree
+                    auto join_node = CreateJoinTree(union_set, connections, *ear_plan->second, *witness_plan->second);
+                    double cost = join_node->cost;
+
+					idx_t output_vars_number = 0;
+                    const auto& ear_relation = graph.relations[i];
+
+					if (graph.output_vertices.size() > 0) {
+						for (auto vertex : ear_relation) {
+                            if (graph.output_vertices.find(vertex) != graph.output_vertices.end()) {
+                                output_vars_number += 1;
+                            }
+                        }
+					}
+                    
+                    // Store this candidate
+                    EarCandidate candidate;
+                    candidate.ear_idx = i;
+                    candidate.witness_idx = witness_idx;
+					candidate.output_variables_number = output_vars_number;
+                    candidate.cost = cost;
+                    candidate.join_node = std::move(join_node);
+                    candidate.union_set = &union_set;
+                    
+                    ear_candidates.push_back(std::move(candidate));
+                }
+            }
+        }
+        
+        // Select the ear candidate with minimum cost
+        if (!ear_candidates.empty()) {
+            auto best_candidate = std::min_element(ear_candidates.begin(), ear_candidates.end(),
+                [](const EarCandidate& a, const EarCandidate& b) {
+                    if (a.output_variables_number != b.output_variables_number) {
+						return a.output_variables_number < b.output_variables_number; // Prefer candidates with output variables
+					}
+					return a.cost < b.cost; // Otherwise, choose the one with lower cost
+                });
+            
+            // Apply the best reduction step
+            idx_t ear_relation_idx = graph.relation_indices[best_candidate->ear_idx];
+            idx_t witness_relation_idx = graph.relation_indices[best_candidate->witness_idx];
+            
+            // Record this reduction step
+            GYOReductionStep step;
+            step.ear_relation_idx = ear_relation_idx;
+            step.witness_relation_idx = witness_relation_idx;
+            gyo_reduction_sequence.push_back(step);
+            
+            // Update plans with the best join node
+            plans[*best_candidate->union_set] = std::move(best_candidate->join_node);
+            
+            // Update relation mappings - all relations that were in ear_set or witness_set now belong to union_set
+            auto* ear_current_set = relation_to_current_set[ear_relation_idx];
+            auto* witness_current_set = relation_to_current_set[witness_relation_idx];
+            
+            for (auto& [rel_idx, current_set_ptr] : relation_to_current_set) {
+                if (current_set_ptr == ear_current_set || current_set_ptr == witness_current_set) {
+                    relation_to_current_set[rel_idx] = best_candidate->union_set;
+                }
+            }
+            
+            // Check if this is the final set
+            if (best_candidate->union_set->count == total_relations) {
+                final_set = best_candidate->union_set;
+            }
+            
+            // Remove the ear from the graph
+            graph.relations.erase(graph.relations.begin() + best_candidate->ear_idx);
+            graph.relation_indices.erase(graph.relation_indices.begin() + best_candidate->ear_idx);
+            
+            progress_made = true;
+        }
+    }
+
+    // Return the final plan if available
+    if (final_set) {
+        auto final_plan = plans.find(*final_set);
+        if (final_plan != plans.end()) {
+            return std::move(final_plan->second);
+        }
+    }
+    
+    return nullptr;
+}
+
 } // namespace duckdb

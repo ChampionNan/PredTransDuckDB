@@ -6,6 +6,8 @@
 #include "duckdb/planner/expression.hpp"
 #include "duckdb/common/vector.hpp"
 
+#include "duckdb/optimizer/predicate_transfer/setting.hpp"
+
 namespace duckdb {
 
 class DAGEdgeInfo {

@@ -346,12 +346,15 @@ extension/extension_config_local.cmake
 extension_external
 1G
 50G
+*100*
 job_csv
 social-network-sf10-merged-fk
-test_db*
+*_db*
 epinions.txt
 out.txt
-result.txt
+*.txt
 test_tpch.sql
 .vscode-server
 root
+job_1/*
+job_test/*

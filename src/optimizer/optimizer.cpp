@@ -31,6 +31,7 @@
 
 namespace duckdb {
 
+
 Optimizer::Optimizer(Binder &binder, ClientContext &context) : context(context), binder(binder), rewriter(context) {
 	rewriter.rules.push_back(make_uniq<ConstantFoldingRule>(rewriter));
 	rewriter.rules.push_back(make_uniq<DistributivityRule>(rewriter));
@@ -81,7 +82,7 @@ void Optimizer::Verify(LogicalOperator &op) {
 
 unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p) {
 	// std::cout << "At whole Optimize! " << std::endl;
-	// auto total_start = std::chrono::high_resolution_clock::now();
+	auto total_start = std::chrono::high_resolution_clock::now();
 	Verify(*plan_p);
 
 	switch (plan_p->type) {
@@ -119,35 +120,131 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		plan = deliminator.Optimize(std::move(plan));
 	});
 
-	// plan->Print();
-
-	// then we start the first phase of predicate transfer optimization,
-	// building the transfer graph
-#ifdef PredicateTransfer
-	PredicateTransferOptimizer PT(context);
-	plan = PT.PreOptimize(std::move(plan));
-#endif
-
+#ifdef PLAN_DEBUG
+		std::cout << "Before First Join Order Plan " << std::endl;
+		plan->Print();
+        // PrintOperatorBindings(plan.get());
+#endif // DEBUG
 	// then we perform the join ordering optimization
 	// this also rewrites cross products + filters into joins and performs filter pushdowns
 	// auto start2 = std::chrono::high_resolution_clock::now();
-	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
+
+#ifndef YANPLUS
+    RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
 		JoinOrderOptimizer optimizer(context);
-		plan = optimizer.Optimize(std::move(plan));
+        plan = optimizer.Optimize(std::move(plan));
+	});
+#endif // !YANPLUS
+
+#ifdef YANPLUS
+    auto query_type = DetectQueryType(plan.get());
+    std::cout << "Query Type: " << static_cast<int>(query_type) << std::endl;
+    bool GYO = !(query_type == QueryType::OTHER);
+    
+    // Step1: do the join ordering
+    RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
+		JoinOrderOptimizer optimizer(context, GYO);
+        if (GYO) {
+            vector<LogicalOperator*> empty_bf_order;
+            plan = optimizer.CallSolveJoinOrderFixed(std::move(plan), empty_bf_order);
+        }
 	});
 
-#ifdef PredicateTransfer
-	plan = PT.Optimize(std::move(plan));
-#endif
+    // Begin: Keep the copy
+    auto plan_original = plan->Copy(context);
+    bool is_explain_or_copy = false;
+    if (plan->type == LogicalOperatorType::LOGICAL_EXPLAIN || plan->type == LogicalOperatorType::LOGICAL_COPY_TO_FILE) {
+        is_explain_or_copy = true;
+        plan = std::move(plan->children[0]);
+    }
 
-	// rewrites UNNESTs in DelimJoins by moving them to the projection
+    // Step2: specific operation for different query types
+	if (query_type == QueryType::SELECT_STAR) {
+		PredicateTransferOptimizer PT(context);
+		plan = PT.PreOptimize(std::move(plan));
+		auto BFOrder = PT.GetBFOrder();
+		/*  1. Order debug:  
+        std::cout << "BFOrder Size: " << BFOrder.size() << std::endl;
+		for (auto &node : BFOrder) {
+			std::cout << "BFOrder Node: " << node->ParamsToString() << std::endl;
+		}*/
+		RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
+			JoinOrderOptimizer optimizer2(context, GYO);
+			plan = optimizer2.CallSolveJoinOrderFixed(std::move(plan), BFOrder);
+		});
+		plan = PT.Optimize(std::move(plan));
+	} else if (query_type == QueryType::COUNT_STAR || query_type == QueryType::MINMAX_AGGREGATE || query_type == QueryType::SUM) {
+        unique_ptr<LogicalOperator> plan_copy = plan->Copy(context);
+        // Step1: Copy the plan, and record the true agg apply node
+		RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
+			AggregationPushdown aggregation_pushdown(binder, context, query_type);
+			plan_copy = aggregation_pushdown.Rewrite(std::move(plan_copy));
+		});
+        int max_height = DetermineMaxHeight(plan_copy.get());
+        std::cout << "Max Height: " << max_height << std::endl;
+		for (int i = 0; i < max_height; i++) {
+            RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
+                RemoveUnusedColumns unused(binder, context, true);
+                unused.VisitOperator(*plan_copy);
+            });
+            RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
+                AggregationPushdown aggregation_pushdown(binder, context, query_type);
+                plan_copy = aggregation_pushdown.UpdateBinding(std::move(plan_copy));
+            });
+        }
+        column_binding_map_t<unique_ptr<BaseStatistics>> statistics_map_;
+	    RunOptimizer(OptimizerType::STATISTICS_PROPAGATION, [&]() {
+	 	    StatisticsPropagator propagator(*this);
+	 	    propagator.PropagateStatistics(plan_copy);
+	 	    statistics_map_ = propagator.GetStatisticsMap();
+	    });
+        // Step2: Use the record to apply the real aggre prune to the plan
+        RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
+            AggregationPushdown aggregation_pushdown(binder, context, query_type);
+            aggregation_pushdown.RecordAggPushdown(plan_copy);
+            plan = aggregation_pushdown.ApplyAgg(std::move(plan));
+        });
+        std::cout << "1. After ApplyAgg without pruning " << std::endl;
+	    plan->Print();
+        for (int i = 0; i < max_height; i++) {
+            RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
+                RemoveUnusedColumns unused(binder, context, true);
+                unused.VisitOperator(*plan);
+            });
+            RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
+                AggregationPushdown aggregation_pushdown(binder, context, query_type);
+                plan = aggregation_pushdown.UpdateBinding(std::move(plan));
+            });
+            std::cout << "1-" << i << "column pruning" << std::endl;
+	        plan->Print();
+        }
+        // Fix duplicate column error
+        RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
+            RemoveUnusedColumns unused(binder, context, true);
+            unused.VisitOperatorBottomUp(*plan);
+        });
+        std::cout << "After duplicate fix" << std::endl;
+	    plan->Print();
+	}
+
+    // End: Restore the plan
+    if (is_explain_or_copy) {
+        plan_original->children[0] = std::move(plan);
+        plan = std::move(plan_original);
+    }
+#endif // YANPLUS
+
+    std::cout << "2. After whole Agg-Pushdown Plan " << std::endl;
+	plan->Print();
+
+    // rewrites UNNESTs in DelimJoins by moving them to the projection
 	RunOptimizer(OptimizerType::UNNEST_REWRITER, [&]() {
 		UnnestRewriter unnest_rewriter;
 		plan = unnest_rewriter.Optimize(std::move(plan));
 	});
 
-	// removes unused columns
-	RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
+    // removes unused columns
+    RunOptimizer(OptimizerType::UNUSED_COLUMNS, [&]() {
 		RemoveUnusedColumns unused(binder, context, true);
 		unused.VisitOperator(*plan);
 	});
@@ -169,13 +266,15 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		cse_optimizer.VisitOperator(*plan);
 	});
 
-	// perform statistics propagation
+    // perform statistics propagation
 	column_binding_map_t<unique_ptr<BaseStatistics>> statistics_map;
-	// RunOptimizer(OptimizerType::STATISTICS_PROPAGATION, [&]() {
-	// 	StatisticsPropagator propagator(*this);
-	// 	propagator.PropagateStatistics(plan);
-	// 	statistics_map = propagator.GetStatisticsMap();
-	// });
+#ifndef YANPLUS
+	RunOptimizer(OptimizerType::STATISTICS_PROPAGATION, [&]() {
+	 	StatisticsPropagator propagator(*this);
+	 	propagator.PropagateStatistics(plan);
+	 	statistics_map = propagator.GetStatisticsMap();
+	});
+#endif // !YANPLUS
 
 	// creates projection maps so unused columns are projected out early
 	RunOptimizer(OptimizerType::COLUMN_LIFETIME, [&]() {
@@ -219,12 +318,366 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		});
 	}
 
-	// auto total_end = std::chrono::high_resolution_clock::now();
-	// std::cout << "Total Opt Time: " << std::chrono::duration_cast<std::chrono::microseconds>(total_end - total_start).count() << " µs" << std::endl;
+	std::cout << "3. After All Optimizations Plan " << std::endl;
+	plan->Print();
+	// PrintOperatorBindings(plan.get());
+
+	auto total_end = std::chrono::high_resolution_clock::now();
+	std::cout << "Total Opt Time: " << std::chrono::duration_cast<std::chrono::microseconds>(total_end - total_start).count() << " µs" << std::endl;
 
 	Planner::VerifyPlan(context, plan);
 
 	return std::move(plan);
+}
+
+bool Optimizer::HasJoins(LogicalOperator* op) {
+    // Check if current operator is a join
+    if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+        op->type == LogicalOperatorType::LOGICAL_ASOF_JOIN ||
+        op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+        op->type == LogicalOperatorType::LOGICAL_ANY_JOIN ||
+        op->type == LogicalOperatorType::LOGICAL_CROSS_PRODUCT) {
+        return true;
+    }
+    
+    // Recursively check children
+    for (auto& child : op->children) {
+        if (HasJoins(child.get())) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+
+QueryType Optimizer::DetectQueryType(LogicalOperator* op) {
+    bool has_joins = HasJoins(op);
+    if (!op || !has_joins) {
+        return QueryType::OTHER;
+    }
+
+    if (op->type != LogicalOperatorType::LOGICAL_PROJECTION && op->type != LogicalOperatorType::LOGICAL_DISTINCT) {
+        return DetectQueryType(op->children[0].get());
+    }
+    
+    // Case 2: SELECT COUNT(*) FROM table
+    // Usually implemented as a projection over an aggregate
+    if (op->type == LogicalOperatorType::LOGICAL_PROJECTION && 
+        op->children.size() == 1 && 
+        op->children[0]->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+        
+        auto& agg = op->children[0]->Cast<LogicalAggregate>();
+        
+        // Check if this is a COUNT(*) aggregation (no GROUP BY, single expression)
+        if (agg.groups.empty() && agg.expressions.size() == 1) {
+            auto& expr = agg.expressions[0];
+            
+            // Verify it's a COUNT(*) expression
+            if (expr->GetExpressionClass() == ExpressionClass::BOUND_AGGREGATE) {
+                auto& bound_agg = expr->Cast<BoundAggregateExpression>();
+                
+                // Check if this is COUNT(*) or COUNT_STAR
+                if (bound_agg.function.name == "count_star" || 
+                    (bound_agg.function.name == "count" && bound_agg.children.empty())) {
+                    return QueryType::COUNT_STAR;
+                }
+            }
+        }
+    }
+    
+    // Case 3: SELECT MIN(a), MAX(b) FROM table; Or SELECT SUM(a) FROM table [GROUP BY];
+    // Also projection over aggregate, but with MIN/MAX functions
+    if (op->type == LogicalOperatorType::LOGICAL_PROJECTION && 
+        op->children.size() == 1 && 
+        op->children[0]->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+        
+        auto& agg = op->children[0]->Cast<LogicalAggregate>();
+        
+        // Check if this has no GROUP BY
+        if (agg.groups.empty() && !agg.expressions.empty()) {
+            bool is_minmax_aggregate = true;
+            bool is_sum_aggregate = true;
+            
+            // Check all aggregate expressions
+            for (auto& expr : agg.expressions) {
+                if (expr->GetExpressionClass() == ExpressionClass::BOUND_AGGREGATE) {
+                    auto& bound_agg = expr->Cast<BoundAggregateExpression>();
+                    // Only MIN, MAX allowed for simple aggregate type
+                    if (bound_agg.function.name != "min" && 
+                        bound_agg.function.name != "max") {
+                        is_minmax_aggregate = false;
+                    } else if (bound_agg.function.name != "sum") {
+                        is_sum_aggregate = false;
+                    }
+                } else {
+                    is_minmax_aggregate = false;
+                    is_sum_aggregate = false;
+                    break;
+                }
+            }
+            
+            if (is_minmax_aggregate) {
+                return QueryType::MINMAX_AGGREGATE;
+            } else if (is_sum_aggregate) {
+                // If we have SUM, we can still consider it a minmax aggregate
+                return QueryType::SUM;
+            } else {
+                // If we have other aggregates, it's not a simple minmax aggregate
+                return QueryType::OTHER;
+            }
+        }
+    }
+
+	// Case 4: SELECT distinct a FROM 
+    // Usually implemented as a projection over a scan/get
+    if (op->type == LogicalOperatorType::LOGICAL_DISTINCT && 
+        op->children.size() == 1 && 
+        op->children[0]->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+        return QueryType::SELECT_DISTINCT;
+    }
+
+	// Case 1: SELECT * FROM, full query
+    // Usually implemented as a projection over a scan/get
+    if (op->type == LogicalOperatorType::LOGICAL_PROJECTION && 
+        op->children.size() == 1 && 
+        op->children[0]->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY){ 
+        return QueryType::SELECT_STAR;
+    }
+    
+    // Any other query pattern
+    return QueryType::OTHER;
+}
+
+int Optimizer::DetermineMaxHeight(LogicalOperator* op) {
+    if (!op) {
+        return 0;
+    }
+    
+    // Find max height among children
+    int max_child_height = 0;
+    for (auto& child : op->children) {
+        int child_height = DetermineMaxHeight(child.get());
+        max_child_height = std::max(max_child_height, child_height);
+    }
+    
+    // Only increment height for join operators
+    bool is_join = (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || 
+                    op->type == LogicalOperatorType::LOGICAL_ASOF_JOIN ||
+                    op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+                    op->type == LogicalOperatorType::LOGICAL_ANY_JOIN);
+                    
+    return max_child_height + (is_join ? 1 : 0);
+}
+
+
+void Optimizer::PrintOperatorBindings(LogicalOperator* op, const string& prefix) {
+    if (!op) return;
+    
+    // First collect all base tables and column_ids mappings from the operator tree
+    std::unordered_map<idx_t, std::tuple<string, vector<string>, vector<column_t>>> table_map;
+    std::function<void(const LogicalOperator*)> collect_tables = [&](const LogicalOperator* node) {
+        if (!node) return;
+        
+        if (node->type == LogicalOperatorType::LOGICAL_GET) {
+            auto& get = (const LogicalGet&)(*node);
+            table_map[get.table_index] = {get.function.to_string(get.bind_data.get()), get.names, get.column_ids};
+        }
+        
+        for (auto& child : node->children) {
+            collect_tables(child.get());
+        }
+    };
+    
+    collect_tables(op);
+    std::cout << "=================================================================" << std::endl;
+    // Print operator type
+    std::cout << prefix << "Operator: " << LogicalOperatorToString(op->type) << std::endl;
+    
+    // Print detailed information for specific operator types
+    if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+        auto& proj = op->Cast<LogicalProjection>();
+        std::cout << prefix << "Projection Expressions: " << std::endl;
+        for (idx_t i = 0; i < proj.expressions.size(); i++) {
+            auto& expr = proj.expressions[i];
+            std::cout << prefix << "  [" << i << "] " << expr->ToString() << " (type: " << expr->return_type.ToString() << ")";
+            if (expr->GetName() == "annot") {
+                std::cout << " [ANNOT COLUMN]";
+            }
+            std::cout << std::endl;
+            
+            // Print more details for function expressions
+            if (expr->type == ExpressionType::BOUND_FUNCTION) {
+                auto& func_expr = expr->Cast<BoundFunctionExpression>();
+                std::cout << prefix << "    Function: " << func_expr.function.name << std::endl;
+                std::cout << prefix << "    Children: " << func_expr.children.size() << std::endl;
+                
+                for (idx_t j = 0; j < func_expr.children.size(); j++) {
+                    auto& child = func_expr.children[j];
+                    std::cout << prefix << "      [" << j << "] " << child->ToString();
+                    
+                    if (child->type == ExpressionType::BOUND_COLUMN_REF) {
+                        auto& col_ref = child->Cast<BoundColumnRefExpression>();
+                        std::cout << " (binding: " << col_ref.binding.table_index 
+                                  << "." << col_ref.binding.column_index << ")";
+                    }
+                    std::cout << std::endl;
+				}
+        	} else if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+				auto& col_ref = expr->Cast<BoundColumnRefExpression>();
+				std::cout << " (binding: " << col_ref.binding.table_index 
+					  << "." << col_ref.binding.column_index << ")";
+			} else if (expr->type == ExpressionType::CAST) {
+				auto& cast_expr = expr->Cast<BoundCastExpression>();
+				std::cout << " (cast type: " << cast_expr.return_type.ToString() << ")";
+			}
+			std::cout << std::endl;
+        	std::cout << prefix << "Projection Table Index: " << proj.table_index << std::endl;
+		}
+    }
+    else if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+        auto& agg = op->Cast<LogicalAggregate>();
+        
+        std::cout << prefix << "Group Index: " << agg.group_index << std::endl;
+        std::cout << prefix << "Aggregate Index: " << agg.aggregate_index << std::endl;
+        
+        // Print group expressions
+        std::cout << prefix << "Group Expressions: " << std::endl;
+        for (idx_t i = 0; i < agg.groups.size(); i++) {
+            auto& expr = agg.groups[i];
+            std::cout << prefix << "  [" << i << "] " << expr->ToString() << " (type: " << expr->return_type.ToString() << ")";
+            
+            if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+                auto& col_ref = expr->Cast<BoundColumnRefExpression>();
+                std::cout << " (binding: " << col_ref.binding.table_index 
+                          << "." << col_ref.binding.column_index << ")";
+            }
+            std::cout << std::endl;
+        }
+        
+        // Print aggregate expressions
+        std::cout << prefix << "Aggregate Expressions: " << std::endl;
+        for (idx_t i = 0; i < agg.expressions.size(); i++) {
+            auto& expr = agg.expressions[i];
+            std::cout << prefix << "  [" << i << "] " << expr->ToString() << " (type: " << expr->return_type.ToString() << ")";
+            if (expr->GetName() == "annot") {
+                std::cout << " [ANNOT COLUMN]";
+            }
+            std::cout << std::endl;
+            
+            if (expr->type == ExpressionType::BOUND_AGGREGATE) {
+                auto& agg_expr = expr->Cast<BoundAggregateExpression>();
+                std::cout << prefix << "    Aggregate Function: " << agg_expr.function.name << std::endl;
+                std::cout << prefix << "    Children: " << agg_expr.children.size() << std::endl;
+                
+                for (idx_t j = 0; j < agg_expr.children.size(); j++) {
+                    auto& child = agg_expr.children[j];
+                    std::cout << prefix << "      [" << j << "] " << child->ToString();
+                    
+                    if (child->type == ExpressionType::BOUND_COLUMN_REF) {
+                        auto& col_ref = child->Cast<BoundColumnRefExpression>();
+                        std::cout << " (binding: " << col_ref.binding.table_index 
+                                  << "." << col_ref.binding.column_index << ")";
+                    }
+                    std::cout << std::endl;
+                }
+            }
+        }
+    }
+    // If this is a join, print join conditions
+    else if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+        auto& join = op->Cast<LogicalComparisonJoin>();
+        // Print left projection map
+        std::cout << prefix << "Left Projection Map: ";
+        if (!join.left_projection_map.empty()) {
+            std::cout << "[";
+            for (idx_t i = 0; i < join.left_projection_map.size(); i++) {
+                if (i > 0) std::cout << ", ";
+                std::cout << join.left_projection_map[i];
+            }
+            std::cout << "]" << std::endl;
+        } else {
+            std::cout << "empty (all columns preserved)" << std::endl;
+        }
+    
+        // Print right projection map
+        std::cout << prefix << "Right Projection Map: ";
+        if (!join.right_projection_map.empty()) {
+            std::cout << "[";
+            for (idx_t i = 0; i < join.right_projection_map.size(); i++) {
+                if (i > 0) std::cout << ", ";
+                std::cout << join.right_projection_map[i];
+            }
+            std::cout << "]" << std::endl;
+        } else {
+            std::cout << "empty (all columns preserved)" << std::endl;
+        }
+        std::cout << prefix << "Join Conditions:" << std::endl;
+        for (auto& condition : join.conditions) {
+            std::cout << prefix << "  - Left: " << condition.left->ToString() << std::endl;
+            
+            if (condition.left->type == ExpressionType::BOUND_COLUMN_REF) {
+                auto& left_col = condition.left->Cast<BoundColumnRefExpression>();
+                std::cout << prefix << "    Left binding: [" << left_col.binding.table_index 
+                          << "." << left_col.binding.column_index << "]" << std::endl;
+            }
+            
+            std::cout << prefix << "    Right: " << condition.right->ToString() << std::endl;
+            
+            if (condition.right->type == ExpressionType::BOUND_COLUMN_REF) {
+                auto& right_col = condition.right->Cast<BoundColumnRefExpression>();
+                std::cout << prefix << "    Right binding: [" << right_col.binding.table_index 
+                          << "." << right_col.binding.column_index << "]" << std::endl;
+            }
+            
+            std::cout << prefix << "    Comparison: " << EnumUtil::ToChars(condition.comparison) << std::endl;
+        }
+    }
+    
+    // Print column bindings with table info
+    auto bindings = op->GetColumnBindings();
+    std::cout << prefix << "Column Bindings: " << std::endl;
+    for (size_t i = 0; i < bindings.size(); i++) {
+        auto& binding = bindings[i];
+        std::cout << prefix << "    [" << i << "] " << binding.table_index << "." 
+                  << binding.column_index;
+        
+        // If this is a table we know about
+        if (table_map.find(binding.table_index) != table_map.end()) {
+            auto& [table_name, column_names, column_ids] = table_map[binding.table_index];
+            std::cout << " (Table: " << table_name;
+            
+            // For LogicalGet operators, use column_ids to get the actual column
+            if (!column_ids.empty() && binding.column_index < column_ids.size()) {
+                // Map binding.column_index to actual column ID
+                idx_t actual_col_id = column_ids[binding.column_index];
+                
+                if (actual_col_id < column_names.size()) {
+                    std::cout << ", Column: " << column_names[actual_col_id] 
+                              << ", binding.column_index=" << binding.column_index 
+                              << " maps to actual column_id=" << actual_col_id;
+                }
+            } 
+            // Fall back to direct binding if not a LogicalGet mapping
+            else if (binding.column_index < column_names.size()) {
+                std::cout << ", Column: " << column_names[binding.column_index] 
+                          << " (direct binding)";
+            }
+            std::cout << ")";
+        } else {
+            // This might be a derived table (projection, aggregation, etc.)
+            std::cout << " (Derived column)";
+        }
+        
+        std::cout << std::endl;
+    }
+    std::cout << "=================================================================" << std::endl;
+    
+    // Print children recursively
+    for (size_t i = 0; i < op->children.size(); i++) {
+        std::cout << prefix << "Child " << i << ":" << std::endl;
+        PrintOperatorBindings(op->children[i].get(), prefix + "  ");
+    }
 }
 
 } // namespace duckdb

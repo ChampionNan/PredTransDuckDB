@@ -104,6 +104,13 @@ private:
 	bool ExpressionIsConstant(Expression &expr, const Value &val);
 	bool ExpressionIsConstantOrNull(Expression &expr, const Value &val);
 
+	bool IsCompareDistinct(ExpressionType type);
+	double GetDefaultSelectivity(ExpressionType comparison_type) { return 0.25; }
+	double EstimateJoinSelectivity(LogicalJoin &join);
+	double EstimateFilterSelectivity(Expression &condition);
+	double EstimateConstantComparisonSelectivity(BaseStatistics &stats, ExpressionType comparison_type, const Value &constant);
+	double EstimateColumnComparisonSelectivity(BaseStatistics &lstats, BaseStatistics &rstats, ExpressionType comparison_type);
+
 private:
 	Optimizer &optimizer;
 	ClientContext &context;

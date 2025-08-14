@@ -54,6 +54,9 @@ string LogicalAggregate::ParamsToString() const {
 		}
 		result += expressions[i]->GetName();
 	}
+	if (has_estimated_cardinality) {
+		result += "\n(" + to_string(estimated_cardinality) + ")";
+	}
 	return result;
 }
 

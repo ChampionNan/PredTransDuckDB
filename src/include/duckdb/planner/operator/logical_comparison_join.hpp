@@ -27,6 +27,7 @@ public:
 
 	//! The conditions of the join
 	vector<JoinCondition> conditions;
+
 	//! Used for duplicate-eliminated MARK joins
 	vector<LogicalType> mark_types;
 	//! The set of columns that will be duplicate eliminated from the LHS and pushed into the RHS

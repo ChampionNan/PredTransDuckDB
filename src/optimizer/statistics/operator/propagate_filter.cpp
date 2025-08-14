@@ -7,10 +7,11 @@
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
+#include <iostream>
 
 namespace duckdb {
 
-static bool IsCompareDistinct(ExpressionType type) {
+bool StatisticsPropagator::IsCompareDistinct(ExpressionType type) {
 	return type == ExpressionType::COMPARE_DISTINCT_FROM || type == ExpressionType::COMPARE_NOT_DISTINCT_FROM;
 }
 
@@ -214,14 +215,77 @@ void StatisticsPropagator::UpdateFilterStatistics(Expression &condition) {
 	}
 }
 
+double StatisticsPropagator::EstimateFilterSelectivity(Expression &condition) {
+	switch (condition.GetExpressionClass()) {
+	case ExpressionClass::BOUND_BETWEEN: {
+		auto &between = condition.Cast<BoundBetweenExpression>();
+		if (between.input->type == ExpressionType::BOUND_COLUMN_REF) {
+			auto &column_ref = between.input->Cast<BoundColumnRefExpression>();
+			auto stats_entry = statistics_map.find(column_ref.binding);
+			if (stats_entry  != statistics_map.end()) {
+				double lower_sel = 1.0, upper_sel = 1.0;
+				if (between.lower->type == ExpressionType::VALUE_CONSTANT) {
+					lower_sel = EstimateConstantComparisonSelectivity(*stats_entry->second, between.LowerComparisonType(), between.lower->Cast<BoundConstantExpression>().value);
+				}
+				if (between.upper->type == ExpressionType::VALUE_CONSTANT) {
+					upper_sel = EstimateConstantComparisonSelectivity(*stats_entry->second, between.UpperComparisonType(), between.upper->Cast<BoundConstantExpression>().value);
+				}
+				return lower_sel * upper_sel;
+			}
+		}
+		return GetDefaultSelectivity(condition.type);
+	}
+	case ExpressionClass::BOUND_COMPARISON: {
+		auto &comparison = condition.Cast<BoundComparisonExpression>();
+		if (comparison.left->type == ExpressionType::BOUND_COLUMN_REF &&
+		    comparison.right->type == ExpressionType::VALUE_CONSTANT) {
+			auto &column_ref = comparison.left->Cast<BoundColumnRefExpression>();
+			auto stats_entry = statistics_map.find(column_ref.binding);
+			if (stats_entry != statistics_map.end()) {
+				return EstimateConstantComparisonSelectivity(*stats_entry->second, comparison.type, comparison.right->Cast<BoundConstantExpression>().value);
+			}
+		} else if (comparison.left->type == ExpressionType::VALUE_CONSTANT &&
+		           comparison.right->type == ExpressionType::BOUND_COLUMN_REF) {
+			auto &column_ref = comparison.right->Cast<BoundColumnRefExpression>();
+			auto stats_entry = statistics_map.find(column_ref.binding);
+			if (stats_entry != statistics_map.end()) {
+				return EstimateConstantComparisonSelectivity(*stats_entry->second, FlipComparisonExpression(comparison.type),
+				                                             comparison.left->Cast<BoundConstantExpression>().value);
+			}
+		} else if (comparison.left->type == ExpressionType::BOUND_COLUMN_REF &&
+		           comparison.right->type == ExpressionType::BOUND_COLUMN_REF) {
+			auto &left_column_ref = comparison.left->Cast<BoundColumnRefExpression>();
+			auto &right_column_ref = comparison.right->Cast<BoundColumnRefExpression>();
+			auto left_stats = statistics_map.find(left_column_ref.binding);
+			auto right_stats = statistics_map.find(right_column_ref.binding);
+			if (left_stats != statistics_map.end() && right_stats != statistics_map.end()) {
+				return EstimateColumnComparisonSelectivity(*left_stats->second, *right_stats->second, comparison.type);
+			}
+		}
+		return GetDefaultSelectivity(condition.type);
+	}
+	default: 
+		return GetDefaultSelectivity(condition.type);
+	}
+	return GetDefaultSelectivity(condition.type);
+}
+
 unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalFilter &filter,
                                                                      unique_ptr<LogicalOperator> *node_ptr) {
 	// first propagate to the child
 	node_stats = PropagateStatistics(filter.children[0]);
+
+	if (!node_stats) {
+        std::cout << "ERROR: Child statistics is NULL for filter" << std::endl;
+        return nullptr;
+    }
+
 	if (filter.children[0]->type == LogicalOperatorType::LOGICAL_EMPTY_RESULT) {
 		ReplaceWithEmptyResult(*node_ptr);
 		return make_uniq<NodeStatistics>(0, 0);
 	}
+
+	double overall_selectivity = 1.0;
 
 	// then propagate to each of the expressions
 	for (idx_t i = 0; i < filter.expressions.size(); i++) {
@@ -246,10 +310,30 @@ unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalFilt
 		} else {
 			// cannot prune this filter: propagate statistics from the filter
 			UpdateFilterStatistics(*condition);
+
+			double condition_selectivity = EstimateFilterSelectivity(*condition);
+			overall_selectivity *= condition_selectivity;
 		}
 	}
+
+	auto result_stats = make_uniq<NodeStatistics>();
+	if (node_stats && node_stats->has_estimated_cardinality) {
+		idx_t estimated_cardinality = std::max((idx_t)(node_stats->estimated_cardinality * overall_selectivity), (idx_t)1);
+		idx_t max_cardinality = std::max((idx_t)(node_stats->max_cardinality * overall_selectivity), (idx_t)1);
+
+		result_stats->estimated_cardinality = estimated_cardinality;
+		result_stats->has_estimated_cardinality = true;
+		result_stats->max_cardinality = max_cardinality;
+		result_stats->has_max_cardinality = true;
+
+		filter.estimated_cardinality = estimated_cardinality;
+		filter.has_estimated_cardinality = true;
+	} else {
+		std::cout << "Filter estimate error" << std::endl;
+	}
+
 	// the max cardinality of a filter is the cardinality of the input (i.e. no tuples get filtered)
-	return std::move(node_stats);
+	return std::move(result_stats);
 }
 
 } // namespace duckdb

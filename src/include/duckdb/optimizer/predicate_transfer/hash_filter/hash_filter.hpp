@@ -16,6 +16,8 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/optimizer/predicate_transfer/hash_filter/hashtable.hpp"
 
+#include "duckdb/optimizer/predicate_transfer/setting.hpp"
+
 // #define UseHashFilter
 
 #ifdef UseHashFilter
@@ -75,6 +77,12 @@ public:
   // the key component of hash filter
   std::shared_ptr<HashTable> hash_table;
 
+  // The columns applied this Hash Filter
+  vector<ColumnBinding> column_bindings_applied_;
+  
+  // The columns build this Hash Filter
+  vector<ColumnBinding> column_bindings_built_;
+
 
 private:
   struct Hash{                                          
@@ -88,12 +96,6 @@ private:
           return lhs == rhs;     
       }
   };
- 
-  // The columns applied this Hash Filter
-  vector<ColumnBinding> column_bindings_applied_;
-  
-  // The columns build this Hash Filter
-  vector<ColumnBinding> column_bindings_built_;
 
   // Buffer allocated to store an array of power of 2 64-bit blocks.
   std::shared_ptr<arrow::Buffer> buf_;

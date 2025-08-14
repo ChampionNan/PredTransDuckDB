@@ -22,12 +22,12 @@ string JoinNode::ToString() {
 	string result = "-------------------------------\n";
 	result += set.ToString() + "\n";
 	result += "cost = " + to_string(cost) + "\n";
-	result += "left = \n";
 	if (left) {
+		result += "left = \n";
 		result += left->ToString();
 	}
-	result += "right = \n";
 	if (right) {
+		result += "right = \n";
 		result += right->ToString();
 	}
 	return result;

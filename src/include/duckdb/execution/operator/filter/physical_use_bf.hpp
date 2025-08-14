@@ -5,6 +5,8 @@
 #include "duckdb/optimizer/predicate_transfer/bloom_filter/bloom_filter.hpp"
 #include "duckdb/optimizer/predicate_transfer/hash_filter/hash_filter.hpp"
 
+#include "duckdb/optimizer/predicate_transfer/setting.hpp"
+
 namespace duckdb {
 class PhysicalUseBF : public CachingPhysicalOperator {
 public:

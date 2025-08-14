@@ -11,8 +11,19 @@
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/planner/operator/logical_positional_join.hpp"
+#include "duckdb/common/enums/join_type.hpp"
 
 namespace duckdb {
+
+static void MaxCardinalities(unique_ptr<NodeStatistics> &stats, NodeStatistics &new_stats) {
+	if (!stats->has_estimated_cardinality || !new_stats.has_estimated_cardinality || !stats->has_max_cardinality ||
+	    !new_stats.has_max_cardinality) {
+		stats = nullptr;
+		return;
+	}
+	stats->estimated_cardinality = MaxValue<idx_t>(stats->estimated_cardinality, new_stats.estimated_cardinality);
+	stats->max_cardinality = MaxValue<idx_t>(stats->max_cardinality, new_stats.max_cardinality);
+}
 
 void StatisticsPropagator::PropagateStatistics(LogicalComparisonJoin &join, unique_ptr<LogicalOperator> *node_ptr) {
 	for (idx_t i = 0; i < join.conditions.size(); i++) {
@@ -196,17 +207,222 @@ void StatisticsPropagator::MultiplyCardinalities(unique_ptr<NodeStatistics> &sta
 	}
 }
 
+double StatisticsPropagator::EstimateConstantComparisonSelectivity(BaseStatistics &stats, 
+                                                                  ExpressionType comparison_type, 
+                                                                  const Value &constant) {
+    // Handle null comparisons
+    if (!IsCompareDistinct(comparison_type) && constant.IsNull()) {
+        return 0.0;
+    }
+    
+    if (!stats.GetType().IsNumeric() || !NumericStats::HasMinMax(stats)) {
+        return 0.2; // Default value
+    }
+    
+    auto min_val = NumericStats::Min(stats);
+    auto max_val = NumericStats::Max(stats);
+    
+    switch (comparison_type) {
+    case ExpressionType::COMPARE_EQUAL:
+        return 1.0 / std::max(stats.GetDistinctCount(), (idx_t)1);
+        
+    case ExpressionType::COMPARE_LESSTHAN:
+    case ExpressionType::COMPARE_LESSTHANOREQUALTO: {
+		if (constant <= min_val) return 0.0;
+        if (constant >= max_val) return 1.0;
+        
+        double range = max_val.GetValue<double>() - min_val.GetValue<double>();
+        double position = constant.GetValue<double>() - min_val.GetValue<double>();
+        return position / range;
+	}
+    case ExpressionType::COMPARE_GREATERTHAN:
+    case ExpressionType::COMPARE_GREATERTHANOREQUALTO: {
+		if (constant >= max_val) return 0.0;
+        if (constant <= min_val) return 1.0;  
+        double range = max_val.GetValue<double>() - min_val.GetValue<double>();
+        double position = max_val.GetValue<double>() - constant.GetValue<double>();
+        return position / range;
+	}
+    default:
+        return 0.2; // default
+    }
+	return 0.2; // default
+}
+
+double StatisticsPropagator::EstimateColumnComparisonSelectivity(BaseStatistics &lstats, BaseStatistics &rstats, ExpressionType comparison_type) {
+    // For non-numeric types or missing stats, fallback to distinct count approach
+    if (!lstats.GetType().IsNumeric() || !rstats.GetType().IsNumeric() ||
+        !NumericStats::HasMinMax(lstats) || !NumericStats::HasMinMax(rstats)) {
+        
+        // Fallback: Use distinct count approach for non-numeric data
+        if (comparison_type == ExpressionType::COMPARE_EQUAL ||
+            comparison_type == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
+            auto left_distinct = lstats.GetDistinctCount();
+            auto right_distinct = rstats.GetDistinctCount();
+            return 1.0 / std::max({left_distinct, right_distinct, (idx_t)1});
+        }
+        return GetDefaultSelectivity(comparison_type);
+    }
+    
+    // For numeric types, use range-based analysis
+    auto lmin = NumericStats::Min(lstats);
+    auto lmax = NumericStats::Max(lstats);
+    auto rmin = NumericStats::Min(rstats);
+    auto rmax = NumericStats::Max(rstats);
+    
+    switch (comparison_type) {
+    case ExpressionType::COMPARE_EQUAL:
+    case ExpressionType::COMPARE_NOT_DISTINCT_FROM: {
+        // Calculate overlap between ranges
+        double overlap_min = std::max(lmin.GetValue<double>(), rmin.GetValue<double>());
+        double overlap_max = std::min(lmax.GetValue<double>(), rmax.GetValue<double>());
+        
+        if (overlap_max <= overlap_min) {
+            return 0.0; // No overlap = no matches
+        }
+        
+        double left_range = lmax.GetValue<double>() - lmin.GetValue<double>();
+        double right_range = rmax.GetValue<double>() - rmin.GetValue<double>();
+        double overlap_range = overlap_max - overlap_min;
+        
+        if (left_range <= 0 || right_range <= 0) {
+            // Single value ranges - use distinct count approach
+            auto left_distinct = lstats.GetDistinctCount();
+            auto right_distinct = rstats.GetDistinctCount();
+            return 1.0 / std::max({left_distinct, right_distinct, (idx_t)1});
+        }
+        
+        // Estimate selectivity based on overlap proportion
+        // This accounts for the fact that only overlapping values can match
+        double overlap_selectivity = std::min(1.0, (overlap_range / left_range) * (overlap_range / right_range));
+        
+        // Combine with distinct count information for better estimate
+        auto left_distinct = lstats.GetDistinctCount();
+        auto right_distinct = rstats.GetDistinctCount();
+        double distinct_selectivity = 1.0 / std::max({left_distinct, right_distinct, (idx_t)1});
+        
+        // Use the more conservative (smaller) estimate
+        return std::min(overlap_selectivity, distinct_selectivity);
+    }
+    
+    case ExpressionType::COMPARE_LESSTHAN:
+    case ExpressionType::COMPARE_LESSTHANOREQUALTO: {
+        // LEFT < RIGHT or LEFT <= RIGHT
+        if (lmax <= rmin) {
+            return 1.0; // All left values are less than all right values
+        }
+        if (lmin >= rmax) {
+            return 0.0; // No left values are less than right values
+        }
+        
+        // Partial overlap - estimate based on range positions
+        double left_range = lmax.GetValue<double>() - lmin.GetValue<double>();
+        double right_range = rmax.GetValue<double>() - rmin.GetValue<double>();
+        
+        if (left_range <= 0 || right_range <= 0) {
+            return 0.33; // Default for single-value ranges
+        }
+        
+        // Rough estimate: proportion of left values that could be less than right values
+        double overlap_factor = (rmax.GetValue<double>() - lmin.GetValue<double>()) / 
+                               (left_range + right_range);
+        return std::max(0.0, std::min(1.0, overlap_factor));
+    }
+    
+    case ExpressionType::COMPARE_GREATERTHAN:
+    case ExpressionType::COMPARE_GREATERTHANOREQUALTO: {
+        // LEFT > RIGHT or LEFT >= RIGHT
+        if (lmin >= rmax) {
+            return 1.0; // All left values are greater than all right values
+        }
+        if (lmax <= rmin) {
+            return 0.0; // No left values are greater than right values
+        }
+        
+        // Similar logic to less-than, but reversed
+        double left_range = lmax.GetValue<double>() - lmin.GetValue<double>();
+        double right_range = rmax.GetValue<double>() - rmin.GetValue<double>();
+        
+        if (left_range <= 0 || right_range <= 0) {
+            return 0.33; // Default for single-value ranges
+        }
+        
+        double overlap_factor = (lmax.GetValue<double>() - rmin.GetValue<double>()) / 
+                               (left_range + right_range);
+        return std::max(0.0, std::min(1.0, overlap_factor));
+    }
+    
+    default:
+        return GetDefaultSelectivity(comparison_type);
+    }
+}
+
+double StatisticsPropagator::EstimateJoinSelectivity(LogicalJoin &join) {
+	if (join.type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+        return 0.1;
+    }
+	auto &comp_join = join.Cast<LogicalComparisonJoin>();
+    double overall_selectivity = 1.0;
+	for (auto &condition : comp_join.conditions) {
+		double selectivity = 0.1;
+		if (condition.left->type == ExpressionType::VALUE_CONSTANT && condition.right->type == ExpressionType::BOUND_COLUMN_REF) {
+			auto &right_column_ref = condition.right->Cast<BoundColumnRefExpression>();
+			auto right_stats = statistics_map.find(right_column_ref.binding);
+			if (right_stats != statistics_map.end()) {
+				auto &left_constant = condition.left->Cast<BoundConstantExpression>();
+				selectivity = EstimateConstantComparisonSelectivity(*right_stats->second, condition.comparison, left_constant.value);
+			}
+		} else if (condition.right->type == ExpressionType::VALUE_CONSTANT && condition.left->type == ExpressionType::BOUND_COLUMN_REF) {
+			auto &left_column_ref = condition.left->Cast<BoundColumnRefExpression>();
+			auto left_stats = statistics_map.find(left_column_ref.binding);
+			if (left_stats != statistics_map.end()) {
+				auto &right_constant = condition.right->Cast<BoundConstantExpression>();
+				selectivity = EstimateConstantComparisonSelectivity(*left_stats->second, condition.comparison, right_constant.value);
+			}
+		} else if (condition.left->type == ExpressionType::BOUND_COLUMN_REF && condition.right->type == ExpressionType::BOUND_COLUMN_REF) {
+			auto &left_column_ref = condition.left->Cast<BoundColumnRefExpression>();
+			auto &right_column_ref = condition.right->Cast<BoundColumnRefExpression>();
+			auto left_stats = statistics_map.find(left_column_ref.binding);
+			auto right_stats = statistics_map.find(right_column_ref.binding);
+			if (left_stats != statistics_map.end() && right_stats != statistics_map.end()) {
+				selectivity = EstimateColumnComparisonSelectivity(*left_stats->second, *right_stats->second, condition.comparison);
+			}
+		}
+		overall_selectivity *= selectivity;
+    }
+	return overall_selectivity;
+}
+
 unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalJoin &join,
                                                                      unique_ptr<LogicalOperator> *node_ptr) {
 	// first propagate through the children of the join
-	node_stats = PropagateStatistics(join.children[0]);
-	for (idx_t child_idx = 1; child_idx < join.children.size(); child_idx++) {
-		auto child_stats = PropagateStatistics(join.children[child_idx]);
-		if (!child_stats) {
-			node_stats = nullptr;
-		} else if (node_stats) {
-			MultiplyCardinalities(node_stats, *child_stats);
-		}
+	auto left_stats = PropagateStatistics(join.children[0]);
+	auto right_stats = PropagateStatistics(join.children[1]);
+
+	if (!left_stats) {
+    	std::cout << "Left child statistics missing for join type: " << std::endl;
+	}
+	if (!right_stats) {
+    	std::cout << "Right child statistics missing for join type: " << std::endl;
+	}
+	if (left_stats && !left_stats->has_estimated_cardinality) {
+    	std::cout << "Left child has stats but no estimated cardinality" << std::endl;
+	}
+	if (right_stats && !right_stats->has_estimated_cardinality) {
+    	std::cout << "Right child has stats but no estimated cardinality" << std::endl;
+	}
+
+	if (left_stats && left_stats->has_estimated_cardinality && !left_stats->has_max_cardinality) {
+		left_stats->max_cardinality = left_stats->estimated_cardinality;
+		left_stats->has_max_cardinality = true;
+	}
+	if (right_stats && right_stats->has_estimated_cardinality && !right_stats->has_max_cardinality) {
+		right_stats->max_cardinality = right_stats->estimated_cardinality;
+		right_stats->has_max_cardinality = true;
+	}
+
+	if (left_stats && right_stats) {
+		MultiplyCardinalities(left_stats, *right_stats);
 	}
 
 	auto join_type = join.join_type;
@@ -256,17 +472,34 @@ unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalJoin
 			}
 		}
 	}
-	return std::move(node_stats);
-}
 
-static void MaxCardinalities(unique_ptr<NodeStatistics> &stats, NodeStatistics &new_stats) {
-	if (!stats->has_estimated_cardinality || !new_stats.has_estimated_cardinality || !stats->has_max_cardinality ||
-	    !new_stats.has_max_cardinality) {
-		stats = nullptr;
-		return;
+	auto result_stats = make_uniq<NodeStatistics>();
+	if (left_stats && right_stats && left_stats->has_estimated_cardinality && right_stats->has_estimated_cardinality) {
+		switch (join.type) {
+    	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
+    	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
+    	case LogicalOperatorType::LOGICAL_ASOF_JOIN: {
+			double join_selectivity = EstimateJoinSelectivity(join);
+			idx_t base_cardinality = left_stats->estimated_cardinality * right_stats->estimated_cardinality;
+			result_stats->estimated_cardinality = std::max((idx_t)(base_cardinality * join_selectivity), (idx_t)1);
+            result_stats->has_estimated_cardinality = true;
+			result_stats->has_max_cardinality = true;
+			result_stats->max_cardinality = result_stats->estimated_cardinality;
+		
+			join.estimated_cardinality = result_stats->estimated_cardinality;
+            join.has_estimated_cardinality = true;
+			break;
+		}
+		default: {
+			join.estimated_cardinality = left_stats->estimated_cardinality * right_stats->estimated_cardinality;
+			result_stats = std::move(left_stats);
+            break;
+		}
+		}
+	} else {
+		std::cout << "Join estimate error" << std::endl;
 	}
-	stats->estimated_cardinality = MaxValue<idx_t>(stats->estimated_cardinality, new_stats.estimated_cardinality);
-	stats->max_cardinality = MaxValue<idx_t>(stats->max_cardinality, new_stats.max_cardinality);
+	return std::move(result_stats);
 }
 
 unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalPositionalJoin &join,

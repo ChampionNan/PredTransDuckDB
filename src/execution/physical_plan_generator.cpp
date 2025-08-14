@@ -7,9 +7,9 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/query_profiler.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
-#include "duckdb/planner/operator/logical_extension_operator.hpp"
 #include "duckdb/planner/operator/list.hpp"
 #include "duckdb/execution/operator/persistent/physical_create_bf.hpp"
+#include "duckdb/execution/operator/helper/physical_extension.hpp"
 
 namespace duckdb {
 
@@ -218,12 +218,17 @@ unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalOperator &
 	case LogicalOperatorType::LOGICAL_USE_BF:
 		plan = CreatePlan(op.Cast<LogicalUseBF>());
 		break;
+	/*
 	case LogicalOperatorType::LOGICAL_EXTENSION_OPERATOR:
 		plan = op.Cast<LogicalExtensionOperator>().CreatePlan(context, *this);
 
 		if (!plan) {
 			throw InternalException("Missing PhysicalOperator for Extension Operator");
 		}
+		break;
+	*/
+	case LogicalOperatorType::LOGICAL_EXTENSION_OPERATOR:
+		plan = CreatePlan(op.Cast<LogicalExtensionOperator>());
 		break;
 	case LogicalOperatorType::LOGICAL_JOIN:
 	case LogicalOperatorType::LOGICAL_DEPENDENT_JOIN:

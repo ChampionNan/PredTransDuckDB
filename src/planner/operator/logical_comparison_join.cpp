@@ -17,6 +17,12 @@ string LogicalComparisonJoin::ParamsToString() const {
 		result += expr->ToString();
 	}
 
+	if (has_estimated_cardinality) {
+		result += "\n(" + to_string(estimated_cardinality) + ")";
+	} else {
+		result += "\n(" + to_string(-1) + ")";
+	}
+
 	return result;
 }
 } // namespace duckdb

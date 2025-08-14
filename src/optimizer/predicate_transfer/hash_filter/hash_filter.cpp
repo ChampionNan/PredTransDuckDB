@@ -8,6 +8,8 @@
 #include "duckdb/common/types/row/partitioned_tuple_data.hpp"
 #include <iostream>
 
+#include "duckdb/optimizer/predicate_transfer/setting.hpp"
+
 #ifdef UseHashFilter
 namespace duckdb {
 arrow::Status HashFilter::CreateEmpty(BufferManager* buffer, vector<LogicalType> layouts) {

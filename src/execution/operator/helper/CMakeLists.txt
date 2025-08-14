@@ -4,6 +4,7 @@ add_library_unity(
   physical_batch_collector.cpp
   physical_create_secret.cpp
   physical_execute.cpp
+  physical_extension.cpp
   physical_explain_analyze.cpp
   physical_limit.cpp
   physical_limit_percent.cpp

@@ -23,11 +23,16 @@ static bool Disjoint(const unordered_set<T> &a, const unordered_set<T> &b) {
 	});
 }
 
-bool QueryGraphManager::Build(LogicalOperator &op) {
+bool QueryGraphManager::Build(LogicalOperator &op, bool recursive) {
 	vector<reference<LogicalOperator>> filter_operators;
 	// have the relation manager extract the join relations and create a reference list of all the
 	// filter operators.
-	auto can_reorder = relation_manager.ExtractJoinRelations(op, filter_operators);
+	bool can_reorder;
+	if (recursive) {
+		can_reorder = relation_manager.ExtractJoinRelations(op, filter_operators);
+	} else {
+		can_reorder = relation_manager.ExtractJoinRelationsNonRecursive(op, filter_operators);
+	}
 	auto num_relations = relation_manager.NumRelations();
 	if (num_relations <= 1 || !can_reorder) {
 		// nothing to optimize/reorder
@@ -304,7 +309,6 @@ unique_ptr<LogicalOperator> QueryGraphManager::RewritePlan(unique_ptr<LogicalOpe
 	for (auto &relation : relation_manager.GetRelations()) {
 		extracted_relations.push_back(ExtractJoinRelation(relation));
 	}
-
 	// now we generate the actual joins
 	auto join_tree = GenerateJoins(extracted_relations, node);
 	// perform the final pushdown of remaining filters

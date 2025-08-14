@@ -2,10 +2,14 @@
 
 #include "duckdb/optimizer/predicate_transfer/dag_manager.hpp"
 #include "duckdb/planner/operator/logical_create_bf.hpp"
+#include "duckdb/planner/operator/logical_extension_operator.hpp"
+
+#include "duckdb/optimizer/predicate_transfer/setting.hpp"
 
 namespace duckdb {
 class PredicateTransferOptimizer {
 public:
+
     explicit PredicateTransferOptimizer(ClientContext &context) : context(context), dag_manager(context) {
 	}
 
@@ -16,6 +20,17 @@ public:
     unique_ptr<LogicalOperator> InsertCreateBFOperator(unique_ptr<LogicalOperator> plan);
 
     unique_ptr<LogicalOperator> InsertCreateBFOperator_d(unique_ptr<LogicalOperator> plan);
+
+
+    void CollectUseBFAndRelatedCreate(const unique_ptr<LogicalOperator> &plan);
+
+    void PrintUseBFAndRelatedCreate(const unique_ptr<LogicalOperator> &plan);
+
+    void PrintDAGManager();
+
+    void PrintBFPairs();
+
+    vector<LogicalOperator*> GetBFOrder();
     
 private:   
 	ClientContext &context;
@@ -62,5 +77,6 @@ private:
     bool PossibleFilterAny(LogicalOperator &node, bool reverse);
 
     unique_ptr<LogicalOperator> InsertCreateTable(unique_ptr<LogicalOperator> plan, LogicalOperator* plan_ptr);
+
 };
 }

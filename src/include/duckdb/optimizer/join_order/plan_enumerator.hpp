@@ -8,8 +8,6 @@
 
 #pragma once
 
-#include "duckdb/common/unordered_map.hpp"
-#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/optimizer/join_order/join_relation.hpp"
 #include "duckdb/optimizer/join_order/cardinality_estimator.hpp"
 #include "duckdb/optimizer/join_order/query_graph.hpp"
@@ -20,11 +18,45 @@
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/logical_operator_visitor.hpp"
 
+#include "duckdb/common/common.hpp"
+#include "duckdb/common/optional_ptr.hpp"
+#include "duckdb/common/pair.hpp"
+#include "duckdb/common/enums/join_type.hpp"
+#include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/unordered_set.hpp"
+#include "duckdb/common/vector.hpp"
+#include "duckdb/planner/column_binding.hpp"
+#include "duckdb/planner/column_binding_map.hpp"
+
 #include <functional>
 
 namespace duckdb {
 
 class QueryGraphManager;
+
+struct ColumnBindingHash {
+    std::size_t operator()(const ColumnBinding& binding) const {
+        // Hash the table_index and column_index directly
+        std::size_t h1 = std::hash<idx_t>{}(binding.table_index);
+        std::size_t h2 = std::hash<idx_t>{}(binding.column_index);
+        // Combine the hashes - a simple but effective approach
+        return h1 ^ (h2 << 1);
+    }
+};
+
+// Relational hypergraph for GYO algorithm
+struct RelationalHypergraph {
+	// Maps column bindings to unique vertex IDs
+	column_binding_map_t<idx_t> column_to_vertex;
+	// Maps vertex IDs back to column bindings
+	vector<ColumnBinding> vertex_to_column;
+	// Each relation (hyperedge) is a set of vertices
+	vector<unordered_set<idx_t>> relations;
+	// Original relation index for each hyperedge
+	vector<idx_t> relation_indices;
+
+	unordered_set<idx_t> output_vertices;
+};
 
 class PlanEnumerator {
 public:
@@ -39,6 +71,7 @@ public:
 	unique_ptr<JoinNode> SolveJoinOrderLeftDeep();
 	unique_ptr<JoinNode> SolveJoinOrderRandom();
 	unique_ptr<JoinNode> SolveJoinOrderLeftDeepRandom();
+	unique_ptr<JoinNode> SolveJoinOrderFixed(vector<LogicalOperator*> &exec_order);
 	void InitLeafPlans();
 
 	static unique_ptr<LogicalOperator> BuildSideProbeSideSwaps(unique_ptr<LogicalOperator> plan);
@@ -87,6 +120,25 @@ private:
 
 	void UpdateJoinNodesInFullPlan(JoinNode &node);
 	bool NodeInFullPlan(JoinNode &node);
+
+
+// GYO algorithm implementation
+public:
+	LogicalOperator *root_op = nullptr;
+
+    unique_ptr<JoinNode> SolveJoinOrderGYO();
+	void GetOutputVariables();
+	bool IsEar(RelationalHypergraph& graph, idx_t relation_idx, idx_t& witness_idx);
+	RelationalHypergraph BuildRelationalHypergraph();
+
+private:
+    // Reduction sequence for reconstructing the join tree
+    struct GYOReductionStep {
+        idx_t ear_relation_idx;      // Index of the relation being reduced
+        idx_t witness_relation_idx;  // Index of the witness relation
+    };
+    vector<GYOReductionStep> gyo_reduction_sequence;
+	column_binding_set_t output_variables;
 };
 
 } // namespace duckdb

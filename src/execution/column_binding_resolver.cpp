@@ -8,6 +8,7 @@
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_use_bf.hpp"
 #include "duckdb/planner/operator/logical_create_bf.hpp"
+#include "duckdb/planner/operator/logical_extension_operator.hpp"
 #include "duckdb/planner/operator/logical_create_index.hpp"
 #include "duckdb/planner/operator/logical_extension_operator.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
@@ -18,6 +19,7 @@ ColumnBindingResolver::ColumnBindingResolver() {
 }
 
 void ColumnBindingResolver::VisitOperator(LogicalOperator &op) {
+	// std::cout << "\nVisiting operator: \n" << op.ToString() << std::endl;
 	switch (op.type) {
 	case LogicalOperatorType::LOGICAL_ASOF_JOIN:
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN: {
@@ -143,7 +145,7 @@ void ColumnBindingResolver::VisitOperator(LogicalOperator &op) {
 				}
 			}
 			if(bf->BoundColsBuilt.size() == 0) {
-				throw InternalException("No bound colmun found!");
+				throw InternalException("No bound colmun found create_bf!");
 			}
 		}
 		bindings = op.GetColumnBindings();
@@ -162,7 +164,7 @@ void ColumnBindingResolver::VisitOperator(LogicalOperator &op) {
 				}
 			}
 			if(bf->BoundColsApplied.size() == 0) {
-				throw InternalException("No bound colmun found!");
+				throw InternalException("No bound colmun found use_bf!");
 			}
 		}
 		bindings = op.GetColumnBindings();
@@ -179,7 +181,21 @@ void ColumnBindingResolver::VisitOperator(LogicalOperator &op) {
 
 	// general case
 	// first visit the children of this operator
+	/*
+	std::cout << "\nColumn Bindings1: " << std::endl;
+	for (size_t i = 0; i < bindings.size(); i++) {
+        auto& binding = bindings[i];
+        std::cout << "[" << i << "] " << binding.table_index << "." 
+                  << binding.column_index;
+	}*/
 	VisitOperatorChildren(op);
+	/*
+	std::cout << "\nColumn Bindings: " << std::endl;
+	for (size_t i = 0; i < bindings.size(); i++) {
+        auto& binding = bindings[i];
+        std::cout << "[" << i << "] " << binding.table_index << "." 
+                  << binding.column_index;
+	}*/
 	// now visit the expressions of this operator to resolve any bound column references
 	VisitOperatorExpressions(op);
 	// finally update the current set of bindings to the current set of column bindings

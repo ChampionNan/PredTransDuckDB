@@ -12,6 +12,7 @@
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/logical_operator_visitor.hpp"
 #include "duckdb/common/enums/optimizer_type.hpp"
+#include "duckdb/optimizer/aggregation_pushdown.hpp"
 
 #include <functional>
 
@@ -26,6 +27,11 @@ public:
 	unique_ptr<LogicalOperator> Optimize(unique_ptr<LogicalOperator> plan);
 	//! Return a reference to the client context of this optimizer
 	ClientContext &GetContext();
+
+	bool HasJoins(LogicalOperator* op);
+	QueryType DetectQueryType(LogicalOperator* op);
+	int DetermineMaxHeight(LogicalOperator* op);
+	void PrintOperatorBindings(LogicalOperator* op, const string& prefix = "");
 
 	ClientContext &context;
 	Binder &binder;

@@ -379,7 +379,7 @@ SinkFinalizeType PhysicalCreateBF::Finalize(Pipeline &pipeline, Event &event, Cl
 			auto cols = filter->BoundColsBuilt;
 			vector<LogicalType> layouts;
 			for(int i = 0; i < cols.size(); i++) {
-				layouts.emplace_back(sink.total_data.Types()[cols[i]]);
+				layouts.emplace_back(sink.total_data->Types()[cols[i]]);
 			}
 			builder->Begin(1, arrow::internal::CpuInfo::AVX2, &BufferManager::GetBufferManager(context), layouts, 0, filter.get());
 #else
@@ -393,7 +393,7 @@ SinkFinalizeType PhysicalCreateBF::Finalize(Pipeline &pipeline, Event &event, Cl
 			auto cols = filter->BoundColsBuilt;
 			vector<LogicalType> layouts;
 			for(int i = 0; i < cols.size(); i++) {
-				layouts.emplace_back(sink.total_data.Types()[cols[i]]);
+				layouts.emplace_back(sink.total_data->Types()[cols[i]]);
 			}
 			builder->Begin(num_threads, arrow::internal::CpuInfo::AVX2, &BufferManager::GetBufferManager(context), layouts, 0, filter.get());
 #else
