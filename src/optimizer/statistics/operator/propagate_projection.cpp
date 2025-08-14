@@ -32,10 +32,8 @@ unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalProj
 			proj.estimated_cardinality = node_stats->estimated_cardinality;
 			proj.has_estimated_cardinality = true;
 		}
-		if (node_stats->has_max_cardinality) {
-			result_stats->max_cardinality = node_stats->max_cardinality;
-			result_stats->has_max_cardinality = true;
-		}
+		result_stats->max_cardinality = node_stats->max_cardinality;
+		result_stats->has_max_cardinality = true;
 	}
 
 	return std::move(result_stats);

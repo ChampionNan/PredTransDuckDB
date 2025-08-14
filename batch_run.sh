@@ -29,8 +29,3 @@ trap 'echo "Interrupted"; kill 0; exit 130' INT
 
 echo "Starting JOB yan+"
 ./auto_run.sh job job_test 3
-echo "Starting JOB yan+"
-./auto_run.sh job job_test 2
-echo "Starting JOB yan+"
-./auto_run.sh job job_test 1
-

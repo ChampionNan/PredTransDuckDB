@@ -41,6 +41,8 @@ unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalAggr
 	if (aggr.groups.empty()) {
 		result_stats->has_estimated_cardinality = 1;
 		result_stats->estimated_cardinality = true;
+		result_stats->max_cardinality = 1;
+		result_stats->has_max_cardinality = true;
 		aggr.estimated_cardinality = 1;
 		aggr.has_estimated_cardinality = true;
 	} else {
@@ -72,6 +74,9 @@ unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalAggr
 	if (node_stats && node_stats->has_max_cardinality) {
 		result_stats->has_max_cardinality = true;
 		result_stats->max_cardinality = node_stats->max_cardinality;
+	} else {
+		result_stats->has_max_cardinality = true;
+		result_stats->max_cardinality = result_stats->estimated_cardinality;
 	}
 
 	// the max cardinality of an aggregate is the max cardinality of the input (i.e. when every row is a unique group)

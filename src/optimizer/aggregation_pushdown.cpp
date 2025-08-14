@@ -438,11 +438,11 @@ unique_ptr<LogicalOperator> AggregationPushdown::ReplaceRootCountWithSum(unique_
 bool AggregationPushdown::CheckPKFK(LogicalOperator* op) {
     // TODO: Add filter_op check
     // Check if operator is LogicalGet
-    if (op->type != LogicalOperatorType::LOGICAL_GET || op->type != LogicalOperatorType::LOGICAL_FILTER) {
+    if (op->type != LogicalOperatorType::LOGICAL_GET && op->type != LogicalOperatorType::LOGICAL_FILTER) {
         return false; // Not a direct table, can't determine PK status
     }
 
-    if (op->type != LogicalOperatorType::LOGICAL_FILTER && op->children.size() == 1 && op->children[0]->type == LogicalOperatorType::LOGICAL_GET) {
+    if (op->type == LogicalOperatorType::LOGICAL_FILTER && op->children.size() == 1 && op->children[0]->type == LogicalOperatorType::LOGICAL_GET) {
         return CheckPKFK(op->children[0].get());
     }
 
@@ -536,7 +536,7 @@ unique_ptr<LogicalOperator> AggregationPushdown::AddAnnotAttributeDFS(unique_ptr
         bool addLeft = true;
         bool addRight = true;
         
-        op_node->Print();
+        // op_node->Print();
         // Check if any column from left child is a unique key
         if (CheckPKFK(join.children[0].get())) {
             addLeft = false;
@@ -1903,6 +1903,19 @@ bool AggregationPushdown::AggPruneRules(unique_ptr<LogicalOperator>& op) {
             // No aggregation expressions, only group by
             return false;
         }
+
+        if (agg.children.size() > 0) {
+            idx_t child_cardinality = agg.children[0]->estimated_cardinality; 
+            idx_t agg_cardinality = agg.estimated_cardinality;
+            if (agg_cardinality > 0) {
+                double reduction_ratio = static_cast<double>(child_cardinality) / static_cast<double>(agg_cardinality);
+                if (reduction_ratio <= 1.1) {
+                    std::cout << "Reduction ratio: " << reduction_ratio << std::endl;
+                    return false;
+                }
+            }
+        }
+        
         if (agg.groups.size() <= GROUP_BY_NUM) {
             return true;
         }
@@ -1925,7 +1938,9 @@ void AggregationPushdown::RecordAggPushdown(unique_ptr<LogicalOperator>& op) {
 
         auto &join = op->Cast<LogicalComparisonJoin>();
         bool left = false, right = false;
-    
+
+        op->Print();
+
         if (join.children[0]->type == LogicalOperatorType::LOGICAL_PROJECTION) {
             left = AggPruneRules(join.children[0]);
         }

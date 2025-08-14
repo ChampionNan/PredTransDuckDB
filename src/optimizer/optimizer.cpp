@@ -192,6 +192,12 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
                 plan_copy = aggregation_pushdown.UpdateBinding(std::move(plan_copy));
             });
         }
+        column_binding_map_t<unique_ptr<BaseStatistics>> statistics_map_;
+	    RunOptimizer(OptimizerType::STATISTICS_PROPAGATION, [&]() {
+	 	    StatisticsPropagator propagator(*this);
+	 	    propagator.PropagateStatistics(plan_copy);
+	 	    statistics_map_ = propagator.GetStatisticsMap();
+	    });
         // Step2: Use the record to apply the real aggre prune to the plan
         RunOptimizer(OptimizerType::AGGREGATION_PUSHDOWN, [&]() {
             AggregationPushdown aggregation_pushdown(binder, context, query_type);
@@ -260,13 +266,15 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 		cse_optimizer.VisitOperator(*plan);
 	});
 
-	// perform statistics propagation
+    // perform statistics propagation
 	column_binding_map_t<unique_ptr<BaseStatistics>> statistics_map;
+#ifndef YANPLUS
 	RunOptimizer(OptimizerType::STATISTICS_PROPAGATION, [&]() {
 	 	StatisticsPropagator propagator(*this);
 	 	propagator.PropagateStatistics(plan);
 	 	statistics_map = propagator.GetStatisticsMap();
 	});
+#endif // !YANPLUS
 
 	// creates projection maps so unused columns are projected out early
 	RunOptimizer(OptimizerType::COLUMN_LIFETIME, [&]() {

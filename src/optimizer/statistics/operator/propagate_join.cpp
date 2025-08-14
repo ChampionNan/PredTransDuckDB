@@ -398,9 +398,30 @@ unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalJoin
 	// first propagate through the children of the join
 	auto left_stats = PropagateStatistics(join.children[0]);
 	auto right_stats = PropagateStatistics(join.children[1]);
+
+	if (!left_stats) {
+    	std::cout << "Left child statistics missing for join type: " << std::endl;
+	}
 	if (!right_stats) {
-		left_stats = nullptr;
-	} else if (node_stats) {
+    	std::cout << "Right child statistics missing for join type: " << std::endl;
+	}
+	if (left_stats && !left_stats->has_estimated_cardinality) {
+    	std::cout << "Left child has stats but no estimated cardinality" << std::endl;
+	}
+	if (right_stats && !right_stats->has_estimated_cardinality) {
+    	std::cout << "Right child has stats but no estimated cardinality" << std::endl;
+	}
+
+	if (left_stats && left_stats->has_estimated_cardinality && !left_stats->has_max_cardinality) {
+		left_stats->max_cardinality = left_stats->estimated_cardinality;
+		left_stats->has_max_cardinality = true;
+	}
+	if (right_stats && right_stats->has_estimated_cardinality && !right_stats->has_max_cardinality) {
+		right_stats->max_cardinality = right_stats->estimated_cardinality;
+		right_stats->has_max_cardinality = true;
+	}
+
+	if (left_stats && right_stats) {
 		MultiplyCardinalities(left_stats, *right_stats);
 	}
 
@@ -462,6 +483,8 @@ unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalJoin
 			idx_t base_cardinality = left_stats->estimated_cardinality * right_stats->estimated_cardinality;
 			result_stats->estimated_cardinality = std::max((idx_t)(base_cardinality * join_selectivity), (idx_t)1);
             result_stats->has_estimated_cardinality = true;
+			result_stats->has_max_cardinality = true;
+			result_stats->max_cardinality = result_stats->estimated_cardinality;
 		
 			join.estimated_cardinality = result_stats->estimated_cardinality;
             join.has_estimated_cardinality = true;
@@ -473,6 +496,8 @@ unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalJoin
             break;
 		}
 		}
+	} else {
+		std::cout << "Join estimate error" << std::endl;
 	}
 	return std::move(result_stats);
 }

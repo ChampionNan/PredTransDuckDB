@@ -7,6 +7,7 @@
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
+#include <iostream>
 
 namespace duckdb {
 
@@ -273,6 +274,12 @@ unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalFilt
                                                                      unique_ptr<LogicalOperator> *node_ptr) {
 	// first propagate to the child
 	node_stats = PropagateStatistics(filter.children[0]);
+
+	if (!node_stats) {
+        std::cout << "ERROR: Child statistics is NULL for filter" << std::endl;
+        return nullptr;
+    }
+
 	if (filter.children[0]->type == LogicalOperatorType::LOGICAL_EMPTY_RESULT) {
 		ReplaceWithEmptyResult(*node_ptr);
 		return make_uniq<NodeStatistics>(0, 0);
@@ -312,11 +319,17 @@ unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalFilt
 	auto result_stats = make_uniq<NodeStatistics>();
 	if (node_stats && node_stats->has_estimated_cardinality) {
 		idx_t estimated_cardinality = std::max((idx_t)(node_stats->estimated_cardinality * overall_selectivity), (idx_t)1);
+		idx_t max_cardinality = std::max((idx_t)(node_stats->max_cardinality * overall_selectivity), (idx_t)1);
+
 		result_stats->estimated_cardinality = estimated_cardinality;
 		result_stats->has_estimated_cardinality = true;
+		result_stats->max_cardinality = max_cardinality;
+		result_stats->has_max_cardinality = true;
 
 		filter.estimated_cardinality = estimated_cardinality;
 		filter.has_estimated_cardinality = true;
+	} else {
+		std::cout << "Filter estimate error" << std::endl;
 	}
 
 	// the max cardinality of a filter is the cardinality of the input (i.e. no tuples get filtered)
